@@ -38,6 +38,10 @@ class CasingPool {
   }
 
   spawn(pos, heading, rng) {
+    // Validate position to prevent NaN/Infinity corruption in casing pool.
+    if (!pos || !isFinite(pos.x) || !isFinite(pos.y) || !isFinite(pos.z)) {
+      return;
+    }
     const rx = Math.cos(heading);
     const rz = -Math.sin(heading);
     const c = {

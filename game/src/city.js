@@ -56,6 +56,10 @@ export class ColliderGrid {
     this.items = [];
     for (let i = 0; i < boxes.length; i++) this.insert(i, boxes[i]);
     this._stamp = new Uint32Array(boxes.length);
+    // Guard against negative or zero box counts in builds to maintain grid validity.
+    if (boxes.length === 0) {
+      this._query = 0;
+    }
   }
 
   // Indices of every box whose cells overlap the circle (x, z, r). Reuses one output array, so

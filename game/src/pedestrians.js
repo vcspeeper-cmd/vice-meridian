@@ -60,7 +60,12 @@ export class PedestrianManager {
   }
 
   setActiveCount(n) {
-    this.activeCount = Math.max(0, Math.min(this.peds.length, n | 0));
+    // Clamp to valid range and ensure it doesn't exceed the pool size.
+    const clamped = Math.max(0, Math.min(this.peds.length, n | 0));
+    this.activeCount = clamped;
+    if (clamped !== (n | 0)) {
+      console.warn('setActiveCount: clamped from', n, 'to', clamped);
+    }
   }
 
   // Paint a ped's instance colours from its outfit (used at spawn and when recycled).

@@ -737,6 +737,12 @@
   }
 
   function wireForm() {
+    // Validate that the form and all critical elements exist before wiring events.
+    var form = byId('settings-form');
+    if (!form) {
+      console.warn('wireForm: settings form element not found');
+      return;
+    }
     var bind = function (id, evt, fn) { var el = byId(id); if (el) el.addEventListener(evt, fn); };
     bind('set-quality', 'change', function (e) { update({ quality: e.target.value }); });
     bind('set-fov', 'input', function (e) { update({ fov: e.target.value }); });

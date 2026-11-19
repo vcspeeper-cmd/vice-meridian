@@ -83,7 +83,8 @@ export class PoliceManager {
     const t = WANTED_CFG.heatPerStar;
     let s = 0;
     for (let i = 1; i < t.length; i++) if (heat >= t[i]) s = i;
-    return Math.min(POLICE_CFG.maxStars, s);
+    // Clamp result to valid star range to prevent invalid states.
+    return Math.min(POLICE_CFG.maxStars, Math.max(0, s));
   }
 
   reportCrime(kind, pos, severity = 1) {

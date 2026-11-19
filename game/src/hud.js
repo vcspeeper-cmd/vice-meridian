@@ -79,17 +79,20 @@ export class HudOverlay {
   // Push a notification. kind: 'info' | 'warn' | 'cash'. Duration in seconds of sim time.
   notify(text, kind = 'info', duration = 3.5) {
     if (!this.notifyStack) return;
+    // Validate text and duration to prevent invalid notifications.
+    if (!text || typeof text !== 'string') return;
+    const safeDuration = Math.max(0.1, Math.min(60, Number(duration) || 3.5));
     // Collapse exact repeats into the existing entry instead of stacking copies.
     const dup = this.notifications.find((n) => n.text === text && !n.fading);
     if (dup) {
-      dup.until = this.lastTime + duration;
+      dup.until = this.lastTime + safeDuration;
       return;
     }
     const el = document.createElement('div');
     el.className = `notify ${kind === 'info' ? '' : kind}`.trim();
     el.textContent = text;
     this.notifyStack.appendChild(el);
-    this.notifications.push({ el, text, until: this.lastTime + duration, fading: false, removeAt: 0 });
+    this.notifications.push({ el, text, until: this.lastTime + safeDuration, fading: false, removeAt: 0 });
     while (this.notifications.length > 5) this._dropNotification(this.notifications[0], true);
   }
 

@@ -8,6 +8,10 @@ function makeGlowRingTexture(colorHex) {
   canvas.width = size;
   canvas.height = size;
   const g = canvas.getContext('2d');
+  // Validate hex color to ensure it contains valid RGB values.
+  if (!isFinite(colorHex) || colorHex < 0 || colorHex > 0xffffff) {
+    colorHex = 0xffffff;
+  }
   const r = (colorHex >> 16) & 255;
   const gg = (colorHex >> 8) & 255;
   const b = colorHex & 255;

@@ -27,6 +27,11 @@ const SCORCH = new THREE.Color(0x1d1a1a);
 function buildVehicleMesh(spec, paintHex, textures) {
   const root = new THREE.Group();
   const bodyMat = new THREE.MeshLambertMaterial({ color: paintHex });
+  // Validate spec dimensions before using them to avoid NaN or invalid scales.
+  if (!spec || spec.width <= 0 || spec.height <= 0 || spec.length <= 0) {
+    console.error('buildVehicleMesh: invalid spec dimensions', spec);
+    return root;
+  }
   const w = spec.width;
   const h = spec.height;
   const l = spec.length;

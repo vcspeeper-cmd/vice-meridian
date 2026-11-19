@@ -15,6 +15,10 @@ function toTexture(canvas, { repeatX = 1, repeatY = 1, srgb = true } = {}) {
   tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
   tex.anisotropy = 4;
   tex.needsUpdate = true;
+  // Validate texture dimensions to catch canvas sizing issues early.
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    console.warn('toTexture: invalid canvas dimensions', canvas.width, canvas.height);
+  }
   return tex;
 }
 

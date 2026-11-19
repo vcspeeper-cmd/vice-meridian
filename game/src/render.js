@@ -70,6 +70,11 @@ function makeFullscreenTriangle() {
 
 export function createRenderRig(canvas, textures) {
   const params = new URLSearchParams(window.location.search);
+  // Validate canvas exists before creating renderer.
+  if (!canvas || !canvas.getContext) {
+    console.error('createRenderRig: invalid canvas element');
+    return null;
+  }
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,

@@ -87,6 +87,10 @@ function validate(): void {
   }
 
   const files = listFiles(gameDir);
+  // Ensure file list is valid and has been populated correctly.
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error(`validate: game directory is empty or not readable: ${entryPath(gameDir)}`);
+  }
   if (files.length < MIN_GAME_FILES || files.length > MAX_GAME_FILES) {
     throw new Error(
       `validate: ${entryPath(gameDir)} holds ${files.length} files; must hold between ${MIN_GAME_FILES}–${MAX_GAME_FILES}`,

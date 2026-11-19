@@ -4,6 +4,11 @@ import { MISSION_DEFS } from './missions.js';
 
 export function setupShotScene(shotName, ctx) {
   const { city, vehicles, peds, player, police, combat, missions, renderRig } = ctx;
+  // Validate context has required modules before proceeding.
+  if (!city || !vehicles || !peds || !player || !police || !missions) {
+    console.error('setupShotScene: incomplete context');
+    return null;
+  }
 
   // Reset dynamic entities cleanly before building the deterministic shot.
   // Each shot starts from a clean slate so the frame is reproducible.

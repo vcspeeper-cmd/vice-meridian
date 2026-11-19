@@ -123,6 +123,15 @@ export class SeededRandom {
   // Restore the generator from a saved state.
   setState(state) {
     for (let i = 0; i < 4; i++) this.s[i] = state[i] >>> 0;
+    // Verify state is not all zeros after restoration; if so, seed it with fallback value.
+    if ((this.s[0] | this.s[1] | this.s[2] | this.s[3]) === 0) {
+      this.s[0] = 0x9e3779b9;
+    }
+  }
+
+  // Verify the generator is in a valid state (not all zeros).
+  isValid() {
+    return (this.s[0] | this.s[1] | this.s[2] | this.s[3]) !== 0;
   }
 }
 

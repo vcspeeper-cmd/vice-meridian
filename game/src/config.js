@@ -550,6 +550,11 @@ export const FRAME_BUDGET = {
   smoothing: 0.08,
 };
 
+// Validate frame budget thresholds to ensure upshift threshold is always lower than downshift.
+if (FRAME_BUDGET.upshiftMs >= FRAME_BUDGET.downshiftMs) {
+  throw new Error('FRAME_BUDGET.upshiftMs must be less than downshiftMs');
+}
+
 // Input defaults: stick deadzones, look sensitivity and the input buffer window.
 export const INPUT_CFG = {
   stickDeadzone: 0.18,
@@ -563,6 +568,14 @@ export const AUDIO_CFG = {
   busLevels: { sfx: 0.9, vehicle: 0.85, ui: 0.6, music: 0.45, ambience: 0.8 },
   defaultVolume: 0.8,
 };
+
+// Validate that a weapon configuration has required fields and sane values.
+export function validateWeapon(weapon) {
+  if (!weapon.id || !weapon.name) return false;
+  if (typeof weapon.damage !== 'number' || weapon.damage <= 0) return false;
+  if (!weapon.melee && (typeof weapon.range !== 'number' || weapon.range <= 0)) return false;
+  return true;
+}
 
 // Recursively freeze an object graph so no module can mutate shared tunables by accident.
 // Getter-backed properties (CITY.pitch etc.) are left as getters; their results are numbers.

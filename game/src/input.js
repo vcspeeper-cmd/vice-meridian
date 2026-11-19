@@ -359,6 +359,8 @@ export class InputController {
       for (const p of pads) if (p && p.connected) { pad = p; this.gamepadIndex = p.index; break; }
     }
     if (!pad) return;
+    // Safety check: ensure axes and buttons exist before accessing them.
+    if (!pad.axes || pad.axes.length < 4 || !pad.buttons || pad.buttons.length < 16) return;
     const left = radialDeadzone(pad.axes[0] || 0, pad.axes[1] || 0);
     const right = radialDeadzone(pad.axes[2] || 0, pad.axes[3] || 0);
     st.lx = left.x;
@@ -482,5 +484,14 @@ export class InputController {
 
   endFrame() {
     this.justPressed.clear();
+  }
+
+  // Track which input device was used most recently for smart input switching.
+  noteInput(source = 'keyboard') {
+    this.lastInputSource = source;
+  }
+
+  getLastInputSource() {
+    return this.lastInputSource || 'keyboard';
   }
 }

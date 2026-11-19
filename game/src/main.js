@@ -52,6 +52,8 @@ export class StateMachine {
   }
 
   can(next) {
+    // Validate that next is a valid state string before checking transitions.
+    if (typeof next !== 'string' || !next) return false;
     return (this.transitions[this.state] || []).includes(next);
   }
 

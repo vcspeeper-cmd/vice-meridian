@@ -80,6 +80,9 @@ export class PlayerController {
     this.health = PLAYER_CFG.maxHealth;
     this.armour = PLAYER_CFG.maxArmour;
     this.money = 1250;
+    // Validate that health and armour do not exceed their configured maximums.
+    if (this.health > PLAYER_CFG.maxHealth) this.health = PLAYER_CFG.maxHealth;
+    if (this.armour > PLAYER_CFG.maxArmour) this.armour = PLAYER_CFG.maxArmour;
     this.deadTimer = 0;
 
     this.weaponIndex = 0;

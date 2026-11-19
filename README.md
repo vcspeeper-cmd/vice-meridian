@@ -90,12 +90,14 @@ The minimap is rendered from the city road graph every frame to a canvas texture
 
 ## Limits Respected
 
+All entry files have been validated for:
 - **No network**: All assets vendored or synthesised
 - **No external files**: Everything is self-contained (game/ directory only)
 - **No CDN**: three.js is in game/vendor/
 - **Max game/ files**: 900 (currently ~65)
 - **Max game/ size**: 50 MiB (currently ~3 MiB)
 - **Max file path**: 1000 bytes (all paths under 100 bytes)
+- **Module coverage**: Every core module touched and tested during coverage pass
 
 ## Licence
 

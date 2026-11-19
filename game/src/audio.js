@@ -333,10 +333,13 @@ export class AudioEngine {
     if (this.mixer) this.mixer.setMuted(muted);
   }
 
-  // Master volume from the settings menu, 0..1.
   setVolume(v) {
     this.volume = Math.max(0, Math.min(1, v));
     if (this.mixer) this.mixer.setVolume(this.volume);
+    // Ensure mixer state stays in sync with engine's tracked volume.
+    if (this.mixer && Math.abs(this.mixer.volume - this.volume) > 0.01) {
+      this.mixer.setVolume(this.volume);
+    }
   }
 
   setSirenActive(active, distance = 40) {
