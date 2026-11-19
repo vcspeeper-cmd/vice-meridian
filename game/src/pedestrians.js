@@ -15,6 +15,14 @@ const OUTFITS = [
   { id: 'jogger', weight: 1, shirts: [0x6dff88, 0xff3b9a, 0xffe14d], pants: [0x1f2634], shortSleeves: true, shorts: true, hat: 0x1f2634, speedScale: 2.1 },
 ];
 const OUTFIT_TOTAL = OUTFITS.reduce((s, o) => s + o.weight, 0);
+// Dock workers only appear when a pedestrian is (re)spawned in the industrial district.
+const WORKER_OUTFIT = { id: 'worker', weight: 0, shirts: [0xff8c1a, 0xd8f23a], pants: [0x2c3a52, 0x3b3f46], shortSleeves: false, shorts: false, hat: 0xffd21a, speedScale: 0.95 };
+
+// Spawn ring around the player: pedestrians farther than `despawn` are recycled to a sidewalk
+// point between `inner` and `outer`, preferably behind the player so nobody pops into view.
+const RING = { inner: 55, outer: 110, despawn: 150, recyclePerSecond: 5, deadLinger: 12 };
+// Local avoidance: peds closer than `radius` push apart; the grid cell is the neighbour range.
+const AVOID = { radius: 0.9, cell: 2, strength: 0.5 };
 
 export class PedestrianManager {
   constructor(scene, city, rng, count = 88) {
@@ -39,8 +47,165 @@ export class PedestrianManager {
     this.dummy = new THREE.Object3D();
     this.color = new THREE.Color();
     this.time = 0;
+    // How many of the pool are simulated and drawn (quality tiers lower this).
+    this.activeCount = count;
+    this.recycleBudget = 0;
+    this.recycled = 0;
+    this.avoidGrid = new Map();
+    this.sidewalks = this.city.annex && this.city.annex.sidewalkRects
+      ? this.city.sidewalkRects.concat(this.city.annex.sidewalkRects)
+      : this.city.sidewalkRects;
 
     this.spawnAll();
+  }
+
+  setActiveCount(n) {
+    this.activeCount = Math.max(0, Math.min(this.peds.length, n | 0));
+  }
+
+  // Paint a ped's instance colours from its outfit (used at spawn and when recycled).
+  applyColors(i) {
+    const ped = this.peds[i];
+    const outfit = ped.outfit;
+    this.color.setHex(ped.shirt);
+    this.torsoInst.setColorAt(i, this.color);
+    this.color.setHex(ped.skin);
+    this.headInst.setColorAt(i, this.color);
+    this.color.setHex(outfit.shorts ? ped.skin : ped.pants);
+    this.legLInst.setColorAt(i, this.color);
+    this.legRInst.setColorAt(i, this.color);
+    this.color.setHex(outfit.shortSleeves ? ped.skin : ped.shirt);
+    this.armInst.setColorAt(i * 2, this.color);
+    this.armInst.setColorAt(i * 2 + 1, this.color);
+    this.color.setHex(outfit.hat !== null ? outfit.hat : ped.skin);
+    this.hatInst.setColorAt(i, this.color);
+  }
+
+  markColorsDirty() {
+    this.torsoInst.instanceColor.needsUpdate = true;
+    this.headInst.instanceColor.needsUpdate = true;
+    this.legLInst.instanceColor.needsUpdate = true;
+    this.legRInst.instanceColor.needsUpdate = true;
+    this.armInst.instanceColor.needsUpdate = true;
+    this.hatInst.instanceColor.needsUpdate = true;
+  }
+
+  // A sidewalk point inside the spawn ring, biased behind the player. Returns null if none of a
+  // few seeded tries qualifies (the ped then waits for a later frame).
+  findRingSpawn(player) {
+    const fx = Math.sin(player.heading);
+    const fz = Math.cos(player.heading);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const rect = this.rng.pick(this.sidewalks);
+      const alongX = this.rng.chance(0.5);
+      const edge = this.rng.chance(0.5);
+      const inset = 1.6;
+      const x = alongX ? this.rng.range(rect.minX + inset, rect.maxX - inset) : edge ? rect.minX + inset : rect.maxX - inset;
+      const z = alongX ? (edge ? rect.minZ + inset : rect.maxZ - inset) : this.rng.range(rect.minZ + inset, rect.maxZ - inset);
+      const dx = x - player.pos.x;
+      const dz = z - player.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d < RING.inner || d > RING.outer) continue;
+      // Reject points straight ahead of the player on the first tries.
+      if (attempt < 5 && (dx * fx + dz * fz) / d > 0.35) continue;
+      if (this.city.isBlocked && this.city.isBlocked(x, z, 1)) continue;
+      const dir = alongX ? [this.rng.chance(0.5) ? 1 : -1, 0] : [0, this.rng.chance(0.5) ? 1 : -1];
+      return { x, z, dirX: dir[0], dirZ: dir[1] };
+    }
+    return null;
+  }
+
+  // Move far-away (or long-dead) pedestrians back into the ring around the player.
+  recycle(dt, player) {
+    this.recycleBudget = Math.min(RING.recyclePerSecond, this.recycleBudget + dt * RING.recyclePerSecond);
+    if (this.recycleBudget < 1) return;
+    const despawn2 = RING.despawn * RING.despawn;
+    for (let i = 0; i < this.activeCount && this.recycleBudget >= 1; i++) {
+      const p = this.peds[i];
+      const dx = p.pos.x - player.pos.x;
+      const dz = p.pos.z - player.pos.z;
+      const far = dx * dx + dz * dz > despawn2;
+      const expiredBody = !p.alive && p.hitTimer <= -RING.deadLinger && dx * dx + dz * dz > 40 * 40;
+      if (!far && !expiredBody) continue;
+      const spot = this.findRingSpawn(player);
+      if (!spot) break;
+      this.recycleBudget -= 1;
+      this.recycled++;
+      this.placePedestrian(i, spot.x, spot.z, Math.atan2(spot.dirX, spot.dirZ), spot.dirX, spot.dirZ);
+      // Fresh look: industrial streets get dock workers, everywhere else the normal mix.
+      const district = this.city.districtAt ? this.city.districtAt(spot.x, spot.z) : 'residential';
+      const outfit = district === 'industrial' && this.rng.chance(0.6) ? WORKER_OUTFIT : this.pickOutfit();
+      p.outfit = outfit;
+      p.shirt = this.rng.pick(outfit.shirts);
+      p.pants = this.rng.pick(outfit.pants);
+      p.skin = this.rng.pick(SKIN_TONES);
+      p.speed = this.rng.range(1.4, 2.3) * outfit.speedScale;
+      p.hitTimer = 0;
+      this.applyColors(i);
+      this.markColorsDirty();
+    }
+  }
+
+  // Separation: bucket live, upright peds into a 2 m grid and push overlapping pairs apart.
+  // Each ped also nudges its walking direction away so pairs slide past instead of jamming.
+  applyAvoidance(dt) {
+    const grid = this.avoidGrid;
+    grid.clear();
+    const cell = AVOID.cell;
+    const key = (cx, cz) => cx * 73856093 ^ cz * 19349663;
+    for (let i = 0; i < this.activeCount; i++) {
+      const p = this.peds[i];
+      if (!p.alive || p.knocked > 0) continue;
+      const k = key(Math.floor(p.pos.x / cell), Math.floor(p.pos.z / cell));
+      let list = grid.get(k);
+      if (!list) {
+        list = [];
+        grid.set(k, list);
+      }
+      list.push(i);
+    }
+    const r = AVOID.radius;
+    for (let i = 0; i < this.activeCount; i++) {
+      const a = this.peds[i];
+      if (!a.alive || a.knocked > 0) continue;
+      const cx = Math.floor(a.pos.x / cell);
+      const cz = Math.floor(a.pos.z / cell);
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oz = -1; oz <= 1; oz++) {
+          const list = grid.get(key(cx + ox, cz + oz));
+          if (!list) continue;
+          for (const j of list) {
+            if (j <= i) continue;
+            const b = this.peds[j];
+            const dx = b.pos.x - a.pos.x;
+            const dz = b.pos.z - a.pos.z;
+            const d2 = dx * dx + dz * dz;
+            if (d2 >= r * r || d2 < 1e-8) continue;
+            const d = Math.sqrt(d2);
+            const push = (r - d) * 0.5;
+            const nx = dx / d;
+            const nz = dz / d;
+            a.pos.x -= nx * push;
+            a.pos.z -= nz * push;
+            b.pos.x += nx * push;
+            b.pos.z += nz * push;
+            // Steer only free-running (panicking / dodging) peds; calm walkers keep their
+            // axis-aligned sidewalk heading and just get shouldered aside by the push above.
+            const s = AVOID.strength * dt * 4;
+            const steer = (p, sx, sz) => {
+              if (p.panic <= 0 && p.dodge <= 0 && !p.fleeing) return;
+              p.dirX += sx * s;
+              p.dirZ += sz * s;
+              const l = Math.hypot(p.dirX, p.dirZ) || 1;
+              p.dirX /= l;
+              p.dirZ /= l;
+            };
+            steer(a, -nx, -nz);
+            steer(b, nx, nz);
+          }
+        }
+      }
+    }
   }
 
   pickOutfit() {
@@ -113,26 +278,9 @@ export class PedestrianManager {
         knockDirZ: 0,
       };
       this.peds.push(ped);
-
-      this.color.setHex(ped.shirt);
-      this.torsoInst.setColorAt(i, this.color);
-      this.color.setHex(ped.skin);
-      this.headInst.setColorAt(i, this.color);
-      this.color.setHex(outfit.shorts ? ped.skin : ped.pants);
-      this.legLInst.setColorAt(i, this.color);
-      this.legRInst.setColorAt(i, this.color);
-      this.color.setHex(outfit.shortSleeves ? ped.skin : ped.shirt);
-      this.armInst.setColorAt(i * 2, this.color);
-      this.armInst.setColorAt(i * 2 + 1, this.color);
-      this.color.setHex(outfit.hat !== null ? outfit.hat : ped.skin);
-      this.hatInst.setColorAt(i, this.color);
+      this.applyColors(i);
     }
-    this.torsoInst.instanceColor.needsUpdate = true;
-    this.headInst.instanceColor.needsUpdate = true;
-    this.legLInst.instanceColor.needsUpdate = true;
-    this.legRInst.instanceColor.needsUpdate = true;
-    this.armInst.instanceColor.needsUpdate = true;
-    this.hatInst.instanceColor.needsUpdate = true;
+    this.markColorsDirty();
     this.syncInstances();
   }
 
@@ -212,10 +360,11 @@ export class PedestrianManager {
     const pPos = player.pos;
     const annex = this.city.annex;
 
-    for (let i = 0; i < this.peds.length; i++) {
+    for (let i = 0; i < this.activeCount; i++) {
       const p = this.peds[i];
       if (!p.alive) {
-        if (p.hitTimer > 0) p.hitTimer -= dt;
+        // Keeps counting below zero so recycle() can tell how long the body has lain there.
+        p.hitTimer -= dt;
         continue;
       }
 
@@ -341,6 +490,8 @@ export class PedestrianManager {
       }
     }
 
+    this.applyAvoidance(dt);
+    this.recycle(dt, player);
     this.syncInstances();
   }
 
@@ -353,6 +504,17 @@ export class PedestrianManager {
     };
     for (let i = 0; i < this.peds.length; i++) {
       const p = this.peds[i];
+      if (i >= this.activeCount) {
+        // Outside the active pool (low quality tier): collapse every part.
+        hide(this.torsoInst, i);
+        hide(this.headInst, i);
+        hide(this.legLInst, i);
+        hide(this.legRInst, i);
+        hide(this.armInst, i * 2);
+        hide(this.armInst, i * 2 + 1);
+        hide(this.hatInst, i);
+        continue;
+      }
       const down = !p.alive || p.knocked > 0;
       if (down) {
         // Lying flat. A knocked-down ped starts to rise in the last half second.

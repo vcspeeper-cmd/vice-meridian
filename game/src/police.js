@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CITY, POLICE_CFG, WANTED_CFG } from './config.js';
+import { CITY, DIFFICULTY, POLICE_CFG, WANTED_CFG, WANTED_LEVELS } from './config.js';
 import { clamp, wrapAngle } from './random.js';
 
 function createOfficerMesh(uniformColor = 0x1e2c48, accentColor = 0x4ca8ff) {
@@ -37,7 +37,7 @@ function createOfficerMesh(uniformColor = 0x1e2c48, accentColor = 0x4ca8ff) {
   return root;
 }
 
-// Striped sawhorse barrier used in roadblocks.
+// Striped sawhorse barrier used in roadblocks: bright white with red-emissive stripes.
 const BARRIER_GEO = new THREE.BoxGeometry(3.2, 0.5, 0.25);
 const BARRIER_MAT = new THREE.MeshLambertMaterial({ color: 0xf2f2f2, emissive: 0xff3040, emissiveIntensity: 0.25 });
 const LANE_OFFSET = 3.6;
@@ -49,6 +49,7 @@ export class PoliceManager {
     this.vehicles = vehicles;
     this.rng = rng;
 
+    // Heat and wanted level state
     this.stars = 0;
     this.heat = 0;
     this.escapeTimer = 0;
@@ -57,19 +58,26 @@ export class PoliceManager {
     this.bustTimer = 0;
     this.playerSeen = false;
 
+    // Active units: pursuing cruisers, patrol cars, on-foot officers, and roadblocks
     this.pursuitCars = [];
     this.patrols = [];
     this.officers = [];
     this.roadblocks = [];
 
-    // Grid lookup for pathing: intersections indexed by "col,row".
+    // Grid lookup for pathing: intersections indexed by "col,row"
     this.nodeMap = new Map();
     for (const it of city.intersections) this.nodeMap.set(`${it.col},${it.row}`, it);
     this.maxCol = city.roadCentersX.length - 1;
     this.maxRow = city.roadCentersZ.length - 1;
+
+    // Last crime location for alert dispatch
+    this.lastCrime = null;
+    this.lastCrimePos = null;
   }
 
   // --- Heat / stars --------------------------------------------------------------------------
+  // Heat accumulates from crimes; stars are the thresholds heat has crossed.
+  // Heat cools when the player is out of sight.
 
   starsForHeat(heat) {
     const t = WANTED_CFG.heatPerStar;
@@ -132,6 +140,7 @@ export class PoliceManager {
   }
 
   // --- Grid pathing --------------------------------------------------------------------------
+  // Police units follow the street network graph, not cutting through blocks.
 
   nearestNode(x, z) {
     let best = null;
@@ -156,6 +165,7 @@ export class PoliceManager {
   }
 
   // Lane target: the node shifted onto the right-hand lane for the direction of travel.
+  // This keeps traffic on distinct lanes even when they share the same street.
   laneTarget(from, to) {
     const h = Math.atan2(to.x - from.x, to.z - from.z);
     return { x: to.x - Math.cos(h) * LANE_OFFSET, z: to.z + Math.sin(h) * LANE_OFFSET, heading: h };
@@ -185,6 +195,8 @@ export class PoliceManager {
   }
 
   // Steer a cruiser toward (tx, tz) at up to `speed`, slowing for sharp turns.
+  // Uses feedback steering: compute desired heading toward target, blend the current heading
+  // toward that target, and cap the turn rate for realism.
   steerCar(car, tx, tz, speed, dt, turnRate = 2.4) {
     const dx = tx - car.pos.x;
     const dz = tz - car.pos.z;
@@ -280,7 +292,7 @@ export class PoliceManager {
   }
 
   // Two cruisers parked nose-to-nose across the road ahead of the player, with barriers and
-  // two officers behind them.
+  // two officers behind them. A roadblock denies passage and forces the player to flee or fight.
   spawnRoadblock(player) {
     const v = player.vehicle;
     const heading = v ? v.heading : player.heading;
@@ -350,6 +362,7 @@ export class PoliceManager {
   }
 
   // --- Main update ---------------------------------------------------------------------------
+  // Called every frame: update pursuit logic, heat decay, officer combat, and roadblocks.
 
   update(dt, time, player, combat, audio) {
     this.updatePatrols(dt, player);
@@ -388,7 +401,7 @@ export class PoliceManager {
     const sightSq = WANTED_CFG.sightRadius * WANTED_CFG.sightRadius;
     const playerSpeed = player.vehicle ? Math.abs(player.vehicle.speed) : Math.hypot(player.vel.x, player.vel.z);
 
-    // Update pursuing police cruisers
+    // Update pursuing police cruisers: path toward player, deploy officers, handle pursuit state machine.
     for (let i = this.pursuitCars.length - 1; i >= 0; i--) {
       const car = this.pursuitCars[i];
       if (car === player.vehicle || car.aiMode !== 'police') {
@@ -452,7 +465,7 @@ export class PoliceManager {
       }
     }
 
-    // Update on-foot officers
+    // Update on-foot officers: move toward player, fire, handle arrests.
     let closeCop = false;
     for (const o of this.officers) {
       if (!o.alive) continue;

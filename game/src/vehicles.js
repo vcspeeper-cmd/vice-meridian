@@ -587,13 +587,13 @@ export class VehicleManager {
         v.braking = false;
       }
 
-      // Integrate position
+      // Integrate position based on velocity and time step.
       const prevX = v.pos.x;
       const prevZ = v.pos.z;
       v.pos.x += v.vel.x * dt;
       v.pos.z += v.vel.z * dt;
 
-      // Building collisions
+      // Resolve collisions with building geometry: push vehicle out and apply damage.
       const hitWall = this.city.resolveCircleCollisions(v.pos, v.spec.width * 0.56);
       if (hitWall) {
         const impact = v.vel.length();
@@ -603,7 +603,7 @@ export class VehicleManager {
         v.speed *= -0.22;
       }
 
-      // Vehicle-to-vehicle collisions
+      // Vehicle-to-vehicle collisions: separate overlapping vehicles, apply damage proportionally.
       for (const o of this.vehicles) {
         if (o.id <= v.id) continue;
         const dx = o.pos.x - v.pos.x;
@@ -667,7 +667,7 @@ export class VehicleManager {
       // Damage tint: paint darkens toward scorched as health drops; smoke below 35%.
       this.updateDamageVisuals(v, time);
 
-      // Police flashing lightbar
+      // Police flashing lightbar with phase alternation.
       if (v.sirenBar) {
         if (v.sirenActive) {
           const phase = Math.floor(time * 9) % 2 === 0;

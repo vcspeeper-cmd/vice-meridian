@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CITY } from './config.js';
+import { CITY, DIFFICULTY } from './config.js';
 
 // Soft radial gradient used for the glowing ground ring under each marker.
 function makeGlowRingTexture(colorHex) {
@@ -121,17 +121,31 @@ export const MISSION_DEFS = [
     id: 'pier4_reckoning',
     title: 'Pier 4 Reckoning',
     giver: 'TESSA MARLOW',
-    briefing: "Bishop's crew hijacked our cargo at Pier 4 Freight. Clear all five gunmen out of Dockside.",
+    briefing: "Bishop's crew hijacked our cargo at Pier 4 Freight. Clear them out of Dockside — and expect reinforcements.",
     reward: 2500,
     objective: "Eliminate Bishop's crew",
     arenaCenter: { x: 105, z: 175 },
     kind: 'shootout',
+    finale: true,
     enemySpawns: [
       { x: 96, z: 176 },
       { x: 112, z: 178 },
       { x: 103, z: 186 },
       { x: 117, z: 170 },
       { x: 91, z: 185 },
+    ],
+    // Second wave arrives from the freight gate once the first is down; Bishop leads it.
+    waves: [
+      null,
+      {
+        dialogue: "That's Bishop's van at the gate — he brought everyone. End this, Rico.",
+        spawns: [
+          { x: 86, z: 166, health: 65 },
+          { x: 124, z: 164, health: 65 },
+          { x: 108, z: 160, health: 140, boss: true },
+          { x: 98, z: 162, health: 65 },
+        ],
+      },
     ],
   },
   {
@@ -145,9 +159,52 @@ export const MISSION_DEFS = [
     stars: 3,
     kind: 'survive',
   },
+  {
+    id: 'harbor_express',
+    title: 'Harbor Express',
+    giver: 'TESSA MARLOW',
+    briefing: "There's a Harborbox van behind the hotel full of things nobody should see. Get it to the Dockside freight gate in two minutes and don't put a scratch on it.",
+    reward: 1200,
+    objective: 'Deliver the van to the Dockside freight gate',
+    carSpawn: { x: 135, z: -52, heading: 0 },
+    carType: 'van',
+    carColor: 0xe6e2d8,
+    targetPos: { x: 70, z: 128 },
+    timeLimit: 120,
+    maxDamage: 60,
+    kind: 'car_delivery',
+  },
 ];
 
-export const STORY_ORDER = [0, 1, 3, 2];
+// Five-chapter arc: deliver a car on the clock, survive a three-star manhunt, beat the drop
+// window, boost a car and lose the tail, then the two-wave finale at Pier 4.
+export const STORY_ORDER = [4, 3, 0, 1, 2];
+
+// Payouts: base reward from the def plus bonuses that reward clean, fast play.
+export const REWARD_TABLE = {
+  timeBonusPerSecond: 8,
+  noDamageBonus: 300,
+  accuracyBonus: 400,
+  accuracyThreshold: 0.5,
+  carConditionBonus: 250,
+  finaleBonus: 1000,
+  difficultyMultiplier: { easy: 0.8, normal: 1, hard: 1.35 },
+};
+
+// Total payout for a finished mission and an itemised breakdown for the dialogue line.
+export function computeReward(def, { timeRemaining = 0, tookDamage = false, accuracy = 0, carHealth = null, difficulty = 'normal' } = {}) {
+  const parts = [{ label: 'contract', amount: def.reward }];
+  if (timeRemaining > 0 && (def.kind === 'delivery' || def.kind === 'car_delivery')) {
+    parts.push({ label: 'time', amount: Math.round(timeRemaining * REWARD_TABLE.timeBonusPerSecond) });
+  }
+  if (!tookDamage) parts.push({ label: 'untouched', amount: REWARD_TABLE.noDamageBonus });
+  if (def.kind === 'shootout' && accuracy >= REWARD_TABLE.accuracyThreshold) parts.push({ label: 'marksman', amount: REWARD_TABLE.accuracyBonus });
+  if (carHealth !== null && carHealth >= 90) parts.push({ label: 'mint condition', amount: REWARD_TABLE.carConditionBonus });
+  if (def.finale) parts.push({ label: 'finale', amount: REWARD_TABLE.finaleBonus });
+  const mult = REWARD_TABLE.difficultyMultiplier[difficulty] ?? 1;
+  const total = Math.round(parts.reduce((s, p) => s + p.amount, 0) * mult);
+  return { total, parts, mult };
+}
 
 // Health / armour / cash pickups dotted around both grids; they respawn after a minute.
 const PICKUP_SPOTS = [
@@ -202,6 +259,19 @@ export class MissionManager {
 
     this.objectivePos = new THREE.Vector3(CITY.fixerPos.x, 0, CITY.fixerPos.z);
 
+    // Story log the HUD reads: per-mission state, attempts and the payout actually earned.
+    this.logState = {};
+    for (const def of MISSION_DEFS) this.logState[def.id] = { state: 'pending', attempts: 0, earned: 0 };
+    this.difficulty = 'normal';
+    this.timeScale = 1;
+    // Per-attempt tracking for the reward bonuses.
+    this.wave = 0;
+    this.tookDamage = false;
+    this.attemptStartHealth = 100;
+    this.attemptShotsFired = 0;
+    this.attemptShotsHit = 0;
+    this.lastReward = null;
+
     this.pickups = [];
     const pickupGeo = new THREE.OctahedronGeometry(0.45, 0);
     for (const spot of PICKUP_SPOTS) {
@@ -228,17 +298,41 @@ export class MissionManager {
     return MISSION_DEFS[STORY_ORDER[this.completedCount % STORY_ORDER.length]];
   }
 
+  setDifficulty(level) {
+    this.difficulty = level in REWARD_TABLE.difficultyMultiplier ? level : 'normal';
+    this.timeScale = DIFFICULTY[this.difficulty] ? DIFFICULTY[this.difficulty].missionTime : 1;
+  }
+
+  // Story log in chapter order: { id, title, chapter, state, attempts, reward }.
+  getLog() {
+    return STORY_ORDER.map((idx, i) => {
+      const def = MISSION_DEFS[idx];
+      const st = this.logState[def.id];
+      return { id: def.id, title: `${i + 1}. ${def.title}`, chapter: i + 1, state: st.state, attempts: st.attempts, reward: st.earned };
+    });
+  }
+
   get storyChapter() {
     return (this.completedCount % STORY_ORDER.length) + 1;
   }
 
-  startMission(def) {
+  startMission(def, player = null, combat = null) {
     this.clearEnemies();
     this.activeMission = def;
     this.failedDef = null;
     this.retryWindow = 0;
     this.timerRemaining = 0;
     this.surviveElapsed = 0;
+    this.wave = 0;
+    this.tookDamage = false;
+    this.attemptStartHealth = player ? player.health + player.armour : 200;
+    this.attemptShotsFired = combat ? combat.shotsFired : 0;
+    this.attemptShotsHit = combat ? combat.shotsHit || 0 : 0;
+    const log = this.logState[def.id];
+    if (log) {
+      log.state = 'active';
+      log.attempts++;
+    }
     this.giverMarker.group.visible = false;
     this.objectiveMarker.group.visible = true;
     this.objectiveTag = `CH.${this.storyChapter} · ${def.title.toUpperCase()}`;
@@ -249,7 +343,17 @@ export class MissionManager {
       this.objectivePos.set(def.targetPos.x, 0, def.targetPos.z);
       this.objectiveMarker.group.position.copy(this.objectivePos);
       this.objectiveText = def.objective;
-      this.timerRemaining = def.timeLimit || 0;
+      this.timerRemaining = (def.timeLimit || 0) * this.timeScale;
+    } else if (def.kind === 'car_delivery') {
+      this.stage = 'board';
+      this.targetVehicle = this.vehicles.spawnVehicle(def.carType, def.carSpawn.x, def.carSpawn.z, def.carSpawn.heading, {
+        color: def.carColor,
+        aiMode: 'parked',
+      });
+      this.objectivePos.set(def.carSpawn.x, 0, def.carSpawn.z);
+      this.objectiveMarker.group.position.copy(this.objectivePos);
+      this.objectiveText = `Get in the ${this.targetVehicle.spec.name}`;
+      this.timerRemaining = def.timeLimit * this.timeScale;
     } else if (def.kind === 'car_theft') {
       this.stage = 'steal_car';
       this.targetVehicle = this.vehicles.spawnVehicle('convertible', def.carSpawn.x, def.carSpawn.z, def.carSpawn.heading, {
@@ -271,10 +375,27 @@ export class MissionManager {
     } else if (def.kind === 'survive') {
       this.stage = 'survive';
       this.police.setStars(Math.max(this.police.stars, def.stars));
-      this.timerRemaining = def.surviveTime;
+      this.timerRemaining = def.surviveTime / this.timeScale;
       this.objectiveMarker.group.visible = false;
       this.objectiveText = def.objective;
     }
+  }
+
+  // Bring in the next shootout wave (index into def.waves); returns false when none is left.
+  spawnWave(def, index) {
+    const wave = def.waves && def.waves[index];
+    if (!wave) return false;
+    this.wave = index;
+    for (const sp of wave.spawns) {
+      const e = this.spawnEnemy(sp.x, sp.z, { health: sp.health, heading: 0 });
+      if (sp.boss) {
+        e.boss = true;
+        e.mesh.scale.setScalar(1.15);
+      }
+    }
+    if (wave.dialogue) this.showDialogue('TESSA MARLOW', wave.dialogue, 6);
+    this.showToast(`WAVE ${index + 1}`, false, 2);
+    return true;
   }
 
   spawnEnemy(x, z, opts = {}) {
@@ -308,7 +429,10 @@ export class MissionManager {
   updateShootoutText() {
     const total = this.enemies.length || 5;
     const dead = this.enemies.filter((e) => !e.alive).length;
-    this.objectiveText = `Eliminate Bishop's crew ${dead}/${total}`;
+    const def = this.activeMission;
+    const waveCount = def && def.waves ? def.waves.length : 1;
+    const waveText = waveCount > 1 ? ` · wave ${this.wave + 1}/${waveCount}` : '';
+    this.objectiveText = `Eliminate Bishop's crew ${dead}/${total}${waveText}`;
   }
 
   resetToGiver(tag, text) {
@@ -323,22 +447,40 @@ export class MissionManager {
     this.objectiveText = text;
   }
 
-  completeMission(player, audio) {
+  completeMission(player, audio, combat = null) {
     const def = this.activeMission;
-    const reward = def.reward;
+    const fired = combat ? combat.shotsFired - this.attemptShotsFired : 0;
+    const hit = combat ? (combat.shotsHit || 0) - this.attemptShotsHit : 0;
+    const tv = this.targetVehicle;
+    const payout = computeReward(def, {
+      timeRemaining: this.timerRemaining,
+      tookDamage: this.tookDamage,
+      accuracy: fired > 0 ? hit / fired : 0,
+      carHealth: def.kind === 'car_delivery' || def.kind === 'car_theft' ? (tv && tv.health !== undefined ? tv.health : 100) : null,
+      difficulty: this.difficulty,
+    });
+    const reward = payout.total;
+    this.lastReward = payout;
     player.money += reward;
     this.completedCount++;
+    const log = this.logState[def.id];
+    if (log) {
+      log.state = 'passed';
+      log.earned = Math.max(log.earned, reward);
+    }
+    const bonusText = payout.parts.length > 1 ? ` (${payout.parts.slice(1).map((p) => `${p.label} +$${p.amount}`).join(', ')})` : '';
     if (player.money >= 1500 && !player.weaponsState[1].unlocked) {
       player.weaponsState[1].unlocked = true;
-      this.showDialogue('TESSA MARLOW', `Clean work, Rico. +$${reward}. Unlocked MERIDIAN V-9 SMG (Press 3).`, 7.0);
+      this.showDialogue('TESSA MARLOW', `Clean work, Rico. +$${reward}${bonusText}. Unlocked MERIDIAN V-9 SMG (Press 3).`, 7.0);
     } else if (def.kind === 'survive') {
       this.police.resetWanted();
-      this.showDialogue('TESSA MARLOW', `Cargo's clear and I called in a favour — MPD stood down. +$${reward}.`, 6.5);
+      this.showDialogue('TESSA MARLOW', `Cargo's clear and I called in a favour — MPD stood down. +$${reward}${bonusText}.`, 6.5);
     } else {
-      this.showDialogue('TESSA MARLOW', `Contract closed, Rico. Wired $${reward} to your account. Come back for the next job.`, 6.5);
+      this.showDialogue('TESSA MARLOW', `Contract closed, Rico. Wired $${reward}${bonusText}. Come back for the next job.`, 6.5);
     }
     if (audio) {
-      if (audio.playMissionComplete) audio.playMissionComplete();
+      if (audio.playMissionJingle) audio.playMissionJingle(true);
+      else if (audio.playMissionComplete) audio.playMissionComplete();
       else audio.playMissionChime();
     }
     this.showToast('MISSION PASSED', false, 3.5);
@@ -356,7 +498,10 @@ export class MissionManager {
     if (this.targetVehicle && this.targetVehicle.aiMode === 'parked' && this.vehicles.removeVehicle) {
       this.vehicles.removeVehicle(this.targetVehicle);
     }
-    if (audio && audio.playMissionFailed) audio.playMissionFailed();
+    const log = this.logState[def.id];
+    if (log && log.state !== 'passed') log.state = 'failed';
+    if (audio && audio.playMissionJingle) audio.playMissionJingle(false);
+    else if (audio && audio.playMissionFailed) audio.playMissionFailed();
     this.showToast('MISSION FAILED', true, 3.5);
     this.showDialogue(def.giver, `${reason} Press E within ten seconds to try again, or come find me.`, 7);
     this.failedDef = def;
@@ -429,12 +574,27 @@ export class MissionManager {
   }
 
   serialize() {
-    return { completed: this.completedCount };
+    const log = {};
+    for (const [id, st] of Object.entries(this.logState)) log[id] = { state: st.state === 'active' ? 'pending' : st.state, attempts: st.attempts, earned: st.earned };
+    return { completed: this.completedCount, log };
   }
 
   restore(data) {
     if (data && Number.isFinite(data.completed)) {
       this.completedCount = Math.max(0, data.completed | 0);
+      if (data.log && typeof data.log === 'object') {
+        for (const [id, st] of Object.entries(data.log)) {
+          if (!this.logState[id] || !st) continue;
+          this.logState[id].state = ['pending', 'passed', 'failed'].includes(st.state) ? st.state : 'pending';
+          this.logState[id].attempts = Math.max(0, st.attempts | 0);
+          this.logState[id].earned = Math.max(0, st.earned | 0);
+        }
+      } else {
+        // Older saves only stored a count: mark that many chapters as passed.
+        STORY_ORDER.slice(0, Math.min(STORY_ORDER.length, this.completedCount)).forEach((idx) => {
+          this.logState[MISSION_DEFS[idx].id].state = 'passed';
+        });
+      }
       this.resetToGiver('NEXT CONTRACT', `Meet Tessa Marlow for "${this.getNextMissionDef().title}" (Press E)`);
     }
   }
@@ -459,14 +619,14 @@ export class MissionManager {
       if (this.retryWindow > 0) {
         this.retryWindow -= dt;
         if (controls.interact && this.failedDef && player.deadTimer <= 0) {
-          this.startMission(this.failedDef);
+          this.startMission(this.failedDef, player, combat);
           return;
         }
         if (this.retryWindow <= 0) this.failedDef = null;
       }
       const dist = Math.hypot(player.pos.x - CITY.fixerPos.x, player.pos.z - CITY.fixerPos.z);
       if (dist < 6.5 && controls.interact) {
-        this.startMission(this.getNextMissionDef());
+        this.startMission(this.getNextMissionDef(), player, combat);
       }
       return;
     }
@@ -478,20 +638,42 @@ export class MissionManager {
       this.failMission(player.busted ? 'You got busted.' : 'You were wasted.', audio);
       return;
     }
+    if (player.health + player.armour < this.attemptStartHealth - 0.5) this.tookDamage = true;
+    this.attemptStartHealth = Math.min(this.attemptStartHealth, player.health + player.armour);
 
     // Shared countdown for timed objectives.
-    if (this.timerRemaining > 0 && def.kind === 'delivery') {
+    if (this.timerRemaining > 0 && (def.kind === 'delivery' || def.kind === 'car_delivery')) {
       this.timerRemaining -= dt;
       if (this.timerRemaining <= 0) {
         this.timerRemaining = 0;
-        this.failMission('Too slow — the drop window closed.', audio);
+        this.failMission(def.kind === 'car_delivery' ? 'Too slow — the buyer walked.' : 'Too slow — the drop window closed.', audio);
         return;
       }
     }
 
     if (def.kind === 'delivery') {
       const dist = Math.hypot(player.pos.x - def.targetPos.x, player.pos.z - def.targetPos.z);
-      if (dist < 6.0) this.completeMission(player, audio);
+      if (dist < 6.0) this.completeMission(player, audio, combat);
+    } else if (def.kind === 'car_delivery') {
+      const tv = this.targetVehicle;
+      const condition = tv && tv.health !== undefined ? tv.health : 100;
+      if (!tv || tv.destroyed || condition <= 100 - def.maxDamage) {
+        this.failMission('The van is too beaten up to deliver.', audio);
+        return;
+      }
+      if (player.vehicle !== tv) {
+        this.stage = this.stage === 'board' ? 'board' : 'reboard';
+        this.objectiveText = this.stage === 'board' ? `Get in the ${tv.spec.name}` : `Get back in the ${tv.spec.name}`;
+        this.objectivePos.copy(tv.pos);
+        this.objectiveMarker.group.position.set(tv.pos.x, 0, tv.pos.z);
+      } else {
+        this.stage = 'drive';
+        this.objectiveText = `${def.objective} — condition ${Math.round(condition)}%`;
+        this.objectivePos.set(def.targetPos.x, 0, def.targetPos.z);
+        this.objectiveMarker.group.position.copy(this.objectivePos);
+        const dist = Math.hypot(player.pos.x - def.targetPos.x, player.pos.z - def.targetPos.z);
+        if (dist < 7 && Math.abs(tv.speed) < 6) this.completeMission(player, audio, combat);
+      }
     } else if (def.kind === 'car_theft') {
       const tv = this.targetVehicle;
       if (tv && (tv.destroyed || (tv.health !== undefined && tv.health <= 0))) {
@@ -521,7 +703,7 @@ export class MissionManager {
           this.objectiveText = this.police.stars > 0 ? 'Lose the heat, then stash the Coral 88 at your garage' : 'Stash the Coral 88 at your garage';
           this.objectivePos.set(def.dropoffPos.x, 0, def.dropoffPos.z);
           this.objectiveMarker.group.position.copy(this.objectivePos);
-          if (dist < 6.5 && this.police.stars === 0) this.completeMission(player, audio);
+          if (dist < 6.5 && this.police.stars === 0) this.completeMission(player, audio, combat);
         }
       }
     } else if (def.kind === 'survive') {
@@ -532,7 +714,7 @@ export class MissionManager {
       this.objectiveText = `Survive the manhunt — ${Math.ceil(Math.max(0, this.timerRemaining))}s`;
       if (this.timerRemaining <= 0) {
         this.timerRemaining = 0;
-        this.completeMission(player, audio);
+        this.completeMission(player, audio, combat);
       }
     } else if (def.kind === 'shootout') {
       let aliveCount = 0;
@@ -547,13 +729,16 @@ export class MissionManager {
         if (e.hitFlash > 0) e.hitFlash -= dt;
         e.fireCooldown -= dt;
         if (e.fireCooldown <= 0 && dist < 55 && player.deadTimer <= 0) {
-          e.fireCooldown = this.rng.range(0.85, 1.7);
+          // Bishop fires in quicker bursts than his crew.
+          e.fireCooldown = e.boss ? this.rng.range(0.5, 0.9) : this.rng.range(0.85, 1.7);
           combat.fireNpcShot(e, player);
         }
       }
       this.updateShootoutText();
       if (aliveCount === 0 && this.enemies.length > 0) {
-        this.completeMission(player, audio);
+        // Next wave if the def has one, otherwise the mission is won.
+        if (!this.spawnWave(def, this.wave + 1)) this.completeMission(player, audio, combat);
+        else this.updateShootoutText();
       }
     }
   }

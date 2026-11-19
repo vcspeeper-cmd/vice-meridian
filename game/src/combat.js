@@ -1,8 +1,102 @@
 import * as THREE from 'three';
-import { COMBAT_CFG } from './config.js';
+import { COMBAT_CFG, DIFFICULTY } from './config.js';
 import { clamp, lerp } from './random.js';
 
 const _tmpDir = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _casingDummy = new THREE.Object3D();
+
+// Sample a direction uniformly inside a cone of half-angle `angle` around `dir` (unit vector).
+// Uses a uniform disk sample so the spread is round, not the box shape that per-axis jitter gives.
+export function sampleCone(dir, angle, rng, out = new THREE.Vector3()) {
+  if (angle <= 0) return out.copy(dir);
+  const r = Math.sqrt(rng.next()) * Math.tan(angle);
+  const theta = rng.next() * Math.PI * 2;
+  // Orthonormal basis around dir.
+  if (Math.abs(dir.y) < 0.95) _up.set(0, 1, 0);
+  else _up.set(1, 0, 0);
+  _right.crossVectors(dir, _up).normalize();
+  _up.crossVectors(_right, dir).normalize();
+  out.copy(dir).addScaledVector(_right, Math.cos(theta) * r).addScaledVector(_up, Math.sin(theta) * r);
+  return out.normalize();
+}
+
+// Pool of brass shell casings drawn as one InstancedMesh. Each casing flies out to the right of
+// the muzzle, tumbles, bounces on the street and rests briefly before its slot is recycled.
+class CasingPool {
+  constructor(scene, size = 48) {
+    this.size = size;
+    const geo = new THREE.CylinderGeometry(0.03, 0.03, 0.11, 5);
+    geo.rotateZ(Math.PI / 2);
+    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: 0xd9a94a, emissive: 0x3a2808 }), size);
+    this.mesh.frustumCulled = false;
+    this.mesh.count = 0;
+    scene.add(this.mesh);
+    this.items = [];
+    this.next = 0;
+  }
+
+  spawn(pos, heading, rng) {
+    const rx = Math.cos(heading);
+    const rz = -Math.sin(heading);
+    const c = {
+      x: pos.x, y: pos.y, z: pos.z,
+      vx: rx * rng.range(1.6, 2.6) + Math.sin(heading) * rng.range(-0.4, 0.3),
+      vy: rng.range(2.2, 3.4),
+      vz: rz * rng.range(1.6, 2.6) + Math.cos(heading) * rng.range(-0.4, 0.3),
+      rot: rng.range(0, Math.PI * 2),
+      spin: rng.range(12, 22),
+      life: 3.5,
+      bounces: 0,
+    };
+    if (this.items.length < this.size) this.items.push(c);
+    else {
+      this.items[this.next] = c;
+      this.next = (this.next + 1) % this.size;
+    }
+  }
+
+  // Returns how many casings hit the ground this step, so audio can tick a ping per bounce.
+  update(dt) {
+    let landed = 0;
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const c = this.items[i];
+      c.life -= dt;
+      if (c.life <= 0) {
+        this.items.splice(i, 1);
+        if (this.next > this.items.length) this.next = 0;
+        continue;
+      }
+      if (c.bounces < 3) {
+        c.vy -= 18 * dt;
+        c.x += c.vx * dt;
+        c.y += c.vy * dt;
+        c.z += c.vz * dt;
+        c.rot += c.spin * dt;
+        if (c.y < 0.26) {
+          c.y = 0.26;
+          c.vy = -c.vy * 0.35;
+          c.vx *= 0.5;
+          c.vz *= 0.5;
+          c.spin *= 0.4;
+          c.bounces++;
+          if (c.bounces === 1) landed++;
+        }
+      }
+    }
+    for (let i = 0; i < this.items.length; i++) {
+      const c = this.items[i];
+      _casingDummy.position.set(c.x, c.y, c.z);
+      _casingDummy.rotation.set(0, c.rot, c.bounces >= 3 ? 0 : c.rot * 0.7);
+      _casingDummy.updateMatrix();
+      this.mesh.setMatrixAt(i, _casingDummy.matrix);
+    }
+    this.mesh.count = this.items.length;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    return landed;
+  }
+}
 
 export class CombatSystem {
   constructor(scene, city, textures, rng) {
@@ -23,11 +117,65 @@ export class CombatSystem {
     // Hit-marker state read by the HUD: time left and whether the last hit was a kill.
     this.hitMarker = 0;
     this.hitMarkerKill = false;
+    this.hitMarkerHeadshot = false;
     this.lastWeaponIndex = -1;
     this.shotsFired = 0;
+    this.shotsHit = 0;
+    this.headshots = 0;
     this.kills = 0;
     // Optional pedestrian manager so gunfire causes panic and punches can knock civilians down.
     this.peds = null;
+    // Camera pitch still owed back to the player after recoil kicks; paid back smoothly.
+    this.recoilDebt = 0;
+    // Melee lunge: a short forward dash on the punch frame.
+    this.lungeTime = 0;
+    this.lungeDir = new THREE.Vector3();
+    // Hit-registration queue the HUD drains: one entry per confirmed hit, newest last.
+    this.hitQueue = [];
+    this.time = 0;
+    this.difficulty = DIFFICULTY.normal;
+    this.casings = new CasingPool(scene, COMBAT_CFG.maxCasings);
+    // Muzzle "light": an additive warm pool projected on the ground under the shooter. It reads
+    // as the flash lighting the street without adding a real light (which would recompile every
+    // material and cost per-fragment work on software GL).
+    this.lightPool = new THREE.Mesh(
+      new THREE.CircleGeometry(1, 20),
+      new THREE.MeshBasicMaterial({ map: textures.warmGlow || null, color: 0xffb86a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    this.lightPool.rotation.x = -Math.PI / 2;
+    this.lightPool.visible = false;
+    this.lightPoolLife = 0;
+    scene.add(this.lightPool);
+  }
+
+  setDifficulty(level) {
+    this.difficulty = DIFFICULTY[level] || DIFFICULTY.normal;
+  }
+
+  // Push one confirmed hit for the HUD (hit markers, kill feed, damage numbers).
+  registerHit(entry) {
+    this.hitQueue.push({ t: this.time, ...entry });
+    if (this.hitQueue.length > COMBAT_CFG.hitQueueSize) this.hitQueue.shift();
+  }
+
+  // The HUD calls this once per frame to take every hit registered since the last call.
+  consumeHits() {
+    if (this.hitQueue.length === 0) return [];
+    const out = this.hitQueue;
+    this.hitQueue = [];
+    return out;
+  }
+
+  getAccuracy() {
+    return this.shotsFired > 0 ? this.shotsHit / this.shotsFired : 0;
+  }
+
+  flashLightPool(pos, radius = 3.2) {
+    this.lightPool.position.set(pos.x, 0.27, pos.z);
+    this.lightPool.scale.set(radius, radius, 1);
+    this.lightPool.visible = true;
+    this.lightPool.material.opacity = 0.55;
+    this.lightPoolLife = 0.07;
   }
 
   spawnMuzzleFlash(pos, scale = 1.65) {
@@ -129,7 +277,8 @@ export class CombatSystem {
       }
     }
 
-    // Check against NPC cylinder hitboxes
+    // Check against NPC cylinder hitboxes; the top 0.35 m of the cylinder is the head.
+    let headshot = false;
     for (const t of targets) {
       if (!t.alive) continue;
       const toX = t.pos.x - origin.x;
@@ -145,10 +294,11 @@ export class CombatSystem {
         hitTarget = t;
         hitWorld = false;
         hitPos = new THREE.Vector3(px, py, pz);
+        headshot = py >= t.pos.y + COMBAT_CFG.headHeight && distSq < 0.3 * 0.3;
       }
     }
 
-    return { hitTarget, hitPos, dist: bestT, hitWorld };
+    return { hitTarget, hitPos, dist: bestT, hitWorld, headshot };
   }
 
   // Linear damage falloff between the weapon's falloffStart and its range.
@@ -159,18 +309,31 @@ export class CombatSystem {
   }
 
   // Apply damage to an NPC target and, if it dies, start a tumbling death.
-  applyHit(target, amount, dir, player, police) {
+  applyHit(target, amount, dir, player, police, info = {}) {
     target.health -= amount;
     target.hitFlash = 0.2;
     this.hitMarker = COMBAT_CFG.hitMarkerTime;
     this.hitMarkerKill = false;
+    this.hitMarkerHeadshot = Boolean(info.headshot);
+    let killed = false;
     if (target.health <= 0 && target.alive) {
       target.alive = false;
+      killed = true;
       this.hitMarkerKill = true;
       this.kills++;
-      this.startRagdoll(target.mesh, dir, amount);
+      this.startRagdoll(target.mesh, dir, amount * (info.headshot ? 1.4 : 1));
       if (player) player.money += target.faction === 'gang' ? 120 : 50;
     }
+    this.registerHit({
+      kind: killed ? 'kill' : 'hit',
+      headshot: Boolean(info.headshot),
+      damage: Math.round(amount),
+      weapon: info.weapon || 'fists',
+      faction: target.faction || 'police',
+      x: target.pos.x,
+      y: target.pos.y + 1.8,
+      z: target.pos.z,
+    });
     if (police && target.faction !== 'gang') {
       police.reportCrime('shoot_officer', player ? player.pos : target.pos, 1.5);
     }
@@ -252,9 +415,13 @@ export class CombatSystem {
     }
     if (!best) {
       if (audio && audio.playWhoosh) audio.playWhoosh();
+      // Even a whiff carries the body forward a little.
+      this.startLunge(fx, fz, 0.6);
       return false;
     }
     _tmpDir.set(fx, 0, fz);
+    // Close the gap: lunge most of the way to the target, stopping short of its body.
+    this.startLunge(fx, fz, clamp(bestD - 0.9, 0, 1));
     const hitPos = new THREE.Vector3(best.pos.x, best.pos.y + 1.4, best.pos.z);
     this.spawnImpactSpark(hitPos, 0xffffff, 0.9);
     player.addShake(0.08);
@@ -265,9 +432,28 @@ export class CombatSystem {
       this.hitMarkerKill = !best.alive;
       if (police && police.isCopNearby(player.pos, 60)) police.reportCrime('assault', player.pos, 0.6);
     } else {
-      this.applyHit(best, COMBAT_CFG.punchDamage, _tmpDir, player, police);
+      this.applyHit(best, COMBAT_CFG.punchDamage, _tmpDir, player, police, { weapon: 'fists' });
     }
     return true;
+  }
+
+  // Start a melee lunge covering `distance` metres over COMBAT_CFG.lungeTime seconds.
+  startLunge(fx, fz, distance) {
+    if (distance <= 0.01) return;
+    this.lungeTime = COMBAT_CFG.lungeTime;
+    this.lungeDir.set(fx, 0, fz).multiplyScalar(distance / COMBAT_CFG.lungeTime);
+  }
+
+  updateLunge(dt, player) {
+    if (this.lungeTime <= 0 || player.vehicle) {
+      this.lungeTime = 0;
+      return;
+    }
+    const step = Math.min(dt, this.lungeTime);
+    this.lungeTime -= step;
+    player.pos.x += this.lungeDir.x * step;
+    player.pos.z += this.lungeDir.z * step;
+    if (this.city.resolveCircleCollisions) this.city.resolveCircleCollisions(player.pos, 0.48);
   }
 
   firePlayerWeapon(player, targets, police, audio) {
@@ -281,6 +467,12 @@ export class CombatSystem {
 
     const st = player.getCurrentWeaponState();
     if (st.mag <= 0) {
+      if (st.reserve <= 0) {
+        // Empty and nothing to load: dry-fire click, rate-limited by the fire timer.
+        this.fireTimer = spec.fireRate * 2;
+        if (audio && audio.playReloadClick) audio.playReloadClick();
+        return;
+      }
       this.reloadWeapon(player, audio);
       return;
     }
@@ -291,8 +483,14 @@ export class CombatSystem {
     player.addShake(0.08 + (spec.recoil || 0) * 2.2);
     if (audio) audio.playGunshot(spec.id === 'smg' ? 1.25 : 1.0);
 
-    // Recoil kicks the view up a little and lets sustained fire bloom the spread.
-    if (spec.recoil) player.camPitch = Math.max(-0.25, player.camPitch - spec.recoil);
+    // Recoil kicks the view up and is paid back over the next few frames (see update);
+    // sustained fire blooms the spread cone.
+    if (spec.recoil) {
+      const kick = spec.recoil * (1 + this.bloom * 6);
+      const before = player.camPitch;
+      player.camPitch = Math.max(-0.25, player.camPitch - kick);
+      this.recoilDebt += before - player.camPitch;
+    }
     const spread = spec.spread + this.bloom;
     this.bloom = Math.min(COMBAT_CFG.maxBloom, this.bloom + (spec.bloomPerShot || 0.006));
 
@@ -302,24 +500,28 @@ export class CombatSystem {
       player.pos.z + Math.cos(player.heading) * 0.72 - Math.sin(player.heading) * 0.26,
     );
 
-    const aimDir = new THREE.Vector3(
+    const aimCenter = new THREE.Vector3(
       Math.sin(player.camYaw) * Math.cos(player.camPitch),
       -Math.sin(player.camPitch) * 0.65,
       Math.cos(player.camYaw) * Math.cos(player.camPitch),
-    );
-    aimDir.x += (this.rng.next() - 0.5) * spread;
-    aimDir.y += (this.rng.next() - 0.5) * spread;
-    aimDir.z += (this.rng.next() - 0.5) * spread;
-    aimDir.normalize();
+    ).normalize();
+    // Spread is a cone half-angle: the old per-axis jitter of ±spread/2 maps to atan(spread/2).
+    const aimDir = sampleCone(aimCenter, Math.atan(spread * 0.5), this.rng);
 
     this.spawnMuzzleFlash(muzzlePos, 1.55);
+    this.flashLightPool(player.pos, spec.id === 'smg' ? 2.6 : 3.2);
+    this.casings.spawn(muzzlePos, player.heading, this.rng);
     const res = this.raycastTargets(muzzlePos, aimDir, spec.range, targets);
     this.spawnTracer(muzzlePos, res.hitPos, 0xffe48a, 0.13);
-    this.spawnImpactSpark(res.hitPos, res.hitTarget ? 0xff4558 : 0xffbe68);
+    this.spawnImpactSpark(res.hitPos, res.hitTarget ? (res.headshot ? 0xffffff : 0xff4558) : 0xffbe68);
     if (this.peds && this.peds.alertGunfire) this.peds.alertGunfire(player.pos, COMBAT_CFG.panicRadius);
 
     if (res.hitTarget) {
-      this.applyHit(res.hitTarget, this.damageAt(spec, res.dist), aimDir, player, police);
+      this.shotsHit++;
+      if (res.headshot) this.headshots++;
+      const mult = res.headshot ? spec.headshotMult ?? COMBAT_CFG.headshotMultiplier : 1;
+      const dmg = this.damageAt(spec, res.dist) * mult * this.difficulty.playerDamage;
+      this.applyHit(res.hitTarget, dmg, aimDir, player, police, { headshot: res.headshot, weapon: spec.id });
     } else {
       if (res.hitWorld && res.hitPos.y > 1.2 && audio && this.rng.chance(0.25)) audio.playGlassBreak(0.5);
       if (police && police.isCopNearby(player.pos, 75)) police.reportCrime('weapon_fire', player.pos, 0.8);
@@ -354,7 +556,7 @@ export class CombatSystem {
 
     // Accuracy falls off with distance and when the player is moving fast.
     const playerSpeed = player.vehicle ? Math.abs(player.vehicle.speed) : Math.hypot(player.vel.x, player.vel.z);
-    const hitChance = COMBAT_CFG.npcBaseAccuracy * clamp(1.35 - dist / 55, 0.25, 1.2) * clamp(1.15 - playerSpeed / 40, 0.4, 1.1);
+    const hitChance = COMBAT_CFG.npcBaseAccuracy * this.difficulty.npcAccuracy * clamp(1.35 - dist / 55, 0.25, 1.2) * clamp(1.15 - playerSpeed / 40, 0.4, 1.1);
     const hits = forceHit !== null ? forceHit : this.rng.chance(hitChance);
     if (!hits) {
       dir.x += this.rng.range(-0.14, 0.14);
@@ -369,7 +571,7 @@ export class CombatSystem {
     if (this.peds && this.peds.alertGunfire) this.peds.alertGunfire(npc.pos, COMBAT_CFG.panicRadius * 0.7);
 
     if (hits && player.deadTimer <= 0) {
-      const dmg = Math.round(COMBAT_CFG.npcDamage * clamp(1.2 - dist / 80, 0.5, 1.2));
+      const dmg = Math.round(COMBAT_CFG.npcDamage * this.difficulty.npcDamage * clamp(1.2 - dist / 80, 0.5, 1.2));
       player.damage(dmg);
       this.damageFlash = 0.7;
       this.spawnImpactSpark(targetPos, 0xff4558);
@@ -377,11 +579,32 @@ export class CombatSystem {
   }
 
   update(dt, controls, player, allTargets, police, audio) {
+    this.time += dt;
     if (this.fireTimer > 0) this.fireTimer -= dt;
     if (this.meleeTimer > 0) this.meleeTimer -= dt;
     if (this.hitMarker > 0) this.hitMarker = Math.max(0, this.hitMarker - dt);
     if (this.damageFlash > 0) this.damageFlash = Math.max(0, this.damageFlash - dt * 2.4);
     if (!controls.fire) this.bloom = Math.max(0, this.bloom - dt * COMBAT_CFG.bloomRecover);
+
+    // Pay the recoil kick back to the camera: fast at first, easing out (exponential decay).
+    if (this.recoilDebt > 1e-5) {
+      const pay = Math.min(this.recoilDebt, this.recoilDebt * (1 - Math.exp(-COMBAT_CFG.recoilRecovery * dt)) + 0.0004);
+      this.recoilDebt -= pay;
+      if (!controls.fire || this.fireTimer > 0) player.camPitch = Math.min(1.2, player.camPitch + pay);
+    } else {
+      this.recoilDebt = 0;
+    }
+
+    // Muzzle light pool fades in a couple of frames.
+    if (this.lightPoolLife > 0) {
+      this.lightPoolLife -= dt;
+      this.lightPool.material.opacity = Math.max(0, this.lightPoolLife / 0.07) * 0.55;
+      if (this.lightPoolLife <= 0) this.lightPool.visible = false;
+    }
+
+    this.updateLunge(dt, player);
+    const landed = this.casings.update(dt);
+    if (landed > 0 && audio && audio.playShellCasing) audio.playShellCasing();
 
     if (player.weaponIndex !== this.lastWeaponIndex) {
       if (this.lastWeaponIndex >= 0 && audio && audio.playWeaponSwitch) audio.playWeaponSwitch();

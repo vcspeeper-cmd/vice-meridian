@@ -108,6 +108,103 @@ export class PlayerController {
     this.running = false;
     this.landingSquash = 0;
     this.stats = { distanceDriven: 0, distanceWalked: 0, deaths: 0, arrests: 0 };
+
+    // Locomotion state: 'idle' | 'walk' | 'run' | 'sprint' | 'air' | 'downed'.
+    this.moveState = 'idle';
+    this.stamina = PLAYER_CFG.staminaMax;
+    this.staminaLocked = false;
+    // Time since the feet last touched ground (coyote time) and the surface height underfoot.
+    this.airTime = 0;
+    this.groundY = 0.22;
+    this.downedTimer = 0;
+    this.calmTimer = 0;
+    // Footstep events since the last consumeEvents() call, emitted on each stride's foot plant.
+    this.events = [];
+    this.lastStrideSign = 0;
+    this.emitsFootsteps = true;
+    // Settings-driven camera values.
+    this.baseFov = 60;
+    this.reduceMotion = false;
+  }
+
+  setBaseFov(fov) {
+    this.baseFov = clamp(Number(fov) || 60, 45, 100);
+  }
+
+  setReduceMotion(on) {
+    this.reduceMotion = Boolean(on);
+    if (this.reduceMotion) this.shake = 0;
+  }
+
+  // Drain gameplay events (footsteps, landings, knockdowns) for audio and HUD.
+  consumeEvents() {
+    if (this.events.length === 0) return [];
+    const out = this.events;
+    this.events = [];
+    return out;
+  }
+
+  emit(type, data = {}) {
+    this.events.push({ type, ...data });
+    if (this.events.length > 32) this.events.shift();
+  }
+
+  // Knock the player off their feet (big hit, car clip, hard landing). No input until it ends.
+  knockDown(duration = PLAYER_CFG.downedTime) {
+    if (this.deadTimer > 0 || this.vehicle) return;
+    this.downedTimer = Math.max(this.downedTimer, duration);
+    this.moveState = 'downed';
+    this.emit('downed');
+  }
+
+  // Capsule (radius × height, feet at pos.y) against the city's static boxes, using the
+  // spatial index. Boxes whose top is below the feet (+ step height) are surfaces to stand on,
+  // not walls; the highest such top under the capsule becomes the ground height.
+  resolveCapsule() {
+    const r = PLAYER_CFG.radius;
+    const grid = this.city.colliderGrid;
+    const boxes = this.city.colliders;
+    let ground = 0.22;
+    let standingOnBox = false;
+    if (grid) {
+      const ids = grid.query(this.pos.x, this.pos.z, r + 0.05);
+      for (let k = 0; k < ids.length; k++) {
+        const c = boxes[ids[k]];
+        const top = c.maxY + 0.22;
+        const cx = clamp(this.pos.x, c.minX, c.maxX);
+        const cz = clamp(this.pos.z, c.minZ, c.maxZ);
+        const dx = this.pos.x - cx;
+        const dz = this.pos.z - cz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= r * r) continue;
+        if (this.pos.y >= top - PLAYER_CFG.stepHeight) {
+          // Over the box: it is floor. Only count it when the feet are actually above it.
+          if (d2 < (r * 0.6) ** 2 || (this.pos.x >= c.minX && this.pos.x <= c.maxX && this.pos.z >= c.minZ && this.pos.z <= c.maxZ)) {
+            ground = Math.max(ground, top);
+            standingOnBox = true;
+          }
+          continue;
+        }
+        // Wall: push out along the shortest separation.
+        if (d2 > 1e-8) {
+          const d = Math.sqrt(d2);
+          this.pos.x += (dx / d) * (r - d);
+          this.pos.z += (dz / d) * (r - d);
+        } else {
+          const pushes = [this.pos.x - c.minX, c.maxX - this.pos.x, this.pos.z - c.minZ, c.maxZ - this.pos.z];
+          const m = Math.min(...pushes);
+          if (m === pushes[0]) this.pos.x = c.minX - r;
+          else if (m === pushes[1]) this.pos.x = c.maxX + r;
+          else if (m === pushes[2]) this.pos.z = c.minZ - r;
+          else this.pos.z = c.maxZ + r;
+        }
+      }
+    }
+    // Ground-level movement still goes through the city resolver for the world bounds (sea,
+    // pier rails, annex edges). On top of a box those bounds cannot apply.
+    if (!standingOnBox) this.city.resolveCircleCollisions(this.pos, r);
+    this.groundY = ground;
+    return ground;
   }
 
   // Select a weapon by id if it is unlocked; returns true when the selection changed.
@@ -118,9 +215,11 @@ export class PlayerController {
     return true;
   }
 
-  cycleWeapon() {
-    for (let step = 1; step <= WEAPONS.length; step++) {
-      const idx = (this.weaponIndex + step) % WEAPONS.length;
+  // Step to the next (dir = 1) or previous (dir = -1) unlocked weapon.
+  cycleWeapon(dir = 1) {
+    const n = WEAPONS.length;
+    for (let step = 1; step <= n; step++) {
+      const idx = (((this.weaponIndex + step * dir) % n) + n) % n;
       if (this.weaponsState[idx].unlocked) {
         this.weaponIndex = idx;
         return;
@@ -186,6 +285,7 @@ export class PlayerController {
   }
 
   addShake(amount) {
+    if (this.reduceMotion) return;
     this.shake = Math.min(1.2, this.shake + amount);
   }
 
@@ -199,7 +299,9 @@ export class PlayerController {
     }
     this.health = Math.max(0, this.health - rem);
     this.lastHitTimer = 4;
+    this.calmTimer = 0;
     this.addShake(0.32);
+    if (this.health > 0 && amount >= PLAYER_CFG.downedThreshold) this.knockDown();
     if (this.health <= 0) {
       this.deadTimer = 3.2;
       this.busted = false;
@@ -230,6 +332,9 @@ export class PlayerController {
     this.armour = 50;
     this.money = Math.max(0, this.money - 200);
     this.deadTimer = 0;
+    this.downedTimer = 0;
+    this.stamina = PLAYER_CFG.staminaMax;
+    this.staminaLocked = false;
     this.mesh.visible = true;
     this.mesh.rotation.x = 0;
   }
@@ -248,6 +353,7 @@ export class PlayerController {
     const pistol = this.weaponsState.find((w) => w.id === 'pistol');
     if (pistol) pistol.mag = 6;
     this.deadTimer = 0;
+    this.downedTimer = 0;
     this.busted = false;
     this.mesh.visible = true;
     this.mesh.rotation.x = 0;
@@ -304,15 +410,47 @@ export class PlayerController {
     this.lookBack = Boolean(controls.lookBack);
     this.aiming = Boolean(controls.aim) && !this.vehicle;
 
-    // Weapon switching: 1 fists, 2 pistol, 3 SMG (if unlocked), X / RB cycles.
+    // Weapon switching: 1 fists, 2 pistol, 3 SMG (if unlocked), X / RB next, Z / LB previous.
     if (controls.weapon1) this.selectWeapon('fists');
     if (controls.weapon2) this.selectWeapon('pistol');
     if (controls.weapon3) this.selectWeapon('smg');
-    if (controls.nextWeapon) this.cycleWeapon();
+    if (controls.nextWeapon) this.cycleWeapon(1);
+    if (controls.prevWeapon) this.cycleWeapon(-1);
 
-    // Slow health regeneration when out of combat and badly hurt.
+    // Regeneration rules. Armour never regenerates (pickups only). Health creeps back to a low
+    // floor a few seconds after the last hit; with no wanted level, standing still out of
+    // combat refills further, to calmRegenCap.
     if (this.lastHitTimer > 0) this.lastHitTimer -= dt;
     else if (this.health < PLAYER_CFG.healthRegenBelow) this.health = Math.min(PLAYER_CFG.healthRegenBelow, this.health + PLAYER_CFG.healthRegenRate * dt);
+    const wantedNow = police && police.stars > 0;
+    const still = !this.vehicle && Math.hypot(this.vel.x, this.vel.z) < 0.5;
+    this.calmTimer = !wantedNow && this.lastHitTimer <= 0 && still ? this.calmTimer + dt : 0;
+    if (this.calmTimer > PLAYER_CFG.calmDelay && this.health < PLAYER_CFG.calmRegenCap) {
+      this.health = Math.min(PLAYER_CFG.calmRegenCap, this.health + PLAYER_CFG.calmRegenRate * dt);
+    }
+
+    // Downed: lying on the street, no control until the timer runs out, then a quick get-up.
+    if (this.downedTimer > 0 && !this.vehicle) {
+      this.downedTimer -= dt;
+      const k = clamp(this.downedTimer / PLAYER_CFG.downedTime, 0, 1);
+      this.vel.x *= Math.exp(-6 * dt);
+      this.vel.z *= Math.exp(-6 * dt);
+      this.pos.x += this.vel.x * dt;
+      this.pos.z += this.vel.z * dt;
+      this.resolveCapsule();
+      this.mesh.position.copy(this.pos);
+      this.mesh.rotation.y = this.heading;
+      // Fall flat fast, rise during the last 30% of the timer.
+      this.mesh.rotation.x = k > 0.3 ? -Math.PI * 0.5 : -Math.PI * 0.5 * (k / 0.3);
+      this.mesh.position.y = this.pos.y + 0.2 * (k > 0.3 ? 1 : k / 0.3);
+      if (this.downedTimer <= 0) {
+        this.mesh.rotation.x = 0;
+        this.moveState = 'idle';
+        this.emit('getup');
+      }
+      this.updateCamera(dt);
+      return;
+    }
 
     // Enter / exit vehicle
     if (controls.enterExit) {
@@ -341,8 +479,24 @@ export class PlayerController {
       let moveX = controls.moveX !== undefined ? controls.moveX : (controls.right ? 1 : 0) - (controls.left ? 1 : 0);
       const mag = Math.min(1, Math.hypot(moveX, moveZ));
       const aimSlow = this.aiming ? 0.6 : 1;
-      const speed = (controls.sprint && !this.aiming ? PLAYER_CFG.sprintSpeed : PLAYER_CFG.walkSpeed * Math.max(0.35, mag)) * aimSlow;
-      this.running = Boolean(controls.sprint) && mag > 0.1 && !this.aiming;
+      // Stamina: sprinting drains it; once empty, sprint is locked until it recovers a little.
+      const wantsSprint = Boolean(controls.sprint) && mag > 0.1 && !this.aiming;
+      if (wantsSprint && !this.staminaLocked) {
+        this.stamina = Math.max(0, this.stamina - PLAYER_CFG.staminaDrain * dt);
+        if (this.stamina <= 0) this.staminaLocked = true;
+      } else {
+        this.stamina = Math.min(PLAYER_CFG.staminaMax, this.stamina + PLAYER_CFG.staminaRegen * dt);
+        if (this.staminaLocked && this.stamina >= PLAYER_CFG.staminaResume) this.staminaLocked = false;
+      }
+      const sprinting = wantsSprint && !this.staminaLocked;
+      // Walk below 55% stick, run at full deflection (or keyboard), sprint on the sprint button.
+      let speed;
+      if (sprinting) speed = PLAYER_CFG.sprintSpeed;
+      else if (mag < 0.55) speed = PLAYER_CFG.slowWalkSpeed + (PLAYER_CFG.walkSpeed - PLAYER_CFG.slowWalkSpeed) * Math.max(0, (mag - 0.2) / 0.35) * 0.5;
+      else speed = PLAYER_CFG.walkSpeed;
+      speed *= aimSlow;
+      this.running = sprinting;
+      this.moveState = !this.onGround ? 'air' : mag < 0.1 ? 'idle' : sprinting ? 'sprint' : mag < 0.55 ? 'walk' : 'run';
       if (mag > 1e-3 && mag < 1) {
         moveX /= mag;
         moveZ /= mag;
@@ -376,9 +530,16 @@ export class PlayerController {
         this.heading = this.camYaw;
       }
 
-      if (controls.jump && this.onGround) {
+      // Jump with coyote time (a short grace after leaving a ledge) and a press buffer (a jump
+      // pressed just before landing fires on touchdown).
+      const canJump = this.onGround || this.airTime < PLAYER_CFG.coyoteTime;
+      const buffered = controls.jumpBufferAge !== undefined && controls.jumpBufferAge <= PLAYER_CFG.jumpBufferTime;
+      if ((controls.jump || buffered) && canJump && this.vel.y <= 0.01) {
         this.vel.y = PLAYER_CFG.jumpSpeed * (this.running ? 1.08 : 1);
         this.onGround = false;
+        this.airTime = PLAYER_CFG.coyoteTime;
+        if (controls.consumeJump) controls.consumeJump();
+        this.emit('jump');
       }
       this.vel.y -= PLAYER_CFG.gravity * dt;
 
@@ -387,21 +548,35 @@ export class PlayerController {
       this.pos.y += this.vel.y * dt;
       this.stats.distanceWalked += Math.hypot(this.vel.x, this.vel.z) * dt;
 
-      const groundY = 0.22;
+      // Capsule collision first: it also reports the surface height under the feet.
+      const groundY = this.resolveCapsule();
       if (this.pos.y <= groundY) {
         if (!this.onGround) {
           const impact = -this.vel.y;
           this.landingSquash = Math.min(0.25, impact * 0.02);
           if (impact > PLAYER_CFG.fallDamageSpeed) this.damage((impact - PLAYER_CFG.fallDamageSpeed) * 6);
+          this.emit('land', { impact });
           if (audio && audio.playFootstep) audio.playFootstep(1.6);
         }
         this.pos.y = groundY;
         this.vel.y = 0;
         this.onGround = true;
+        this.airTime = 0;
+      } else if (this.pos.y > groundY + 0.05) {
+        // Walked off a raised surface: start falling, but keep coyote time to jump.
+        if (this.onGround && this.vel.y <= 0) this.onGround = false;
+        this.airTime += dt;
       }
       if (this.landingSquash > 0) this.landingSquash = Math.max(0, this.landingSquash - dt * 1.2);
 
-      this.city.resolveCircleCollisions(this.pos, PLAYER_CFG.radius);
+      // Footstep events on each foot plant (stride sine changes sign), weighted by gait.
+      const strideSign = Math.sign(Math.sin(this.walkPhase));
+      if (this.onGround && len > 0.05 && strideSign !== 0 && strideSign !== this.lastStrideSign) {
+        const weight = sprinting ? 1.3 : this.moveState === 'walk' ? 0.6 : 1;
+        this.emit('footstep', { weight, foot: strideSign > 0 ? 'L' : 'R' });
+        if (audio && audio.playFootstep) audio.playFootstep(weight);
+      }
+      this.lastStrideSign = strideSign;
 
       // Animate character limbs
       this.mesh.position.copy(this.pos);
@@ -471,7 +646,7 @@ export class PlayerController {
       this.pos.y + 1.5 - sinP * 2.5,
       this.pos.z + cosY * 8 - sinY * 0.35,
     );
-    const footFov = this.aiming ? 50 : 60;
+    const footFov = this.aiming ? this.baseFov - 10 : this.baseFov;
 
     if (w > 0 && this.lastVehicle) {
       const v = this.lastVehicle;
@@ -493,7 +668,7 @@ export class PlayerController {
         v.pos.y + 1.35,
         v.pos.z + fwdZ * (4.5 + lookAhead),
       );
-      const driveFov = 60 + clamp(speed * 0.34, 0, 16);
+      const driveFov = this.baseFov + clamp(speed * 0.34, 0, 16);
       desiredPos = footPos.lerp(drivePos, w);
       desiredLook = footLook.lerp(driveLook, w);
       targetFov = footFov + (driveFov - footFov) * w;

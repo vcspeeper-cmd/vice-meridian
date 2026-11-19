@@ -45,6 +45,235 @@ export class HudOverlay {
     // Last values written to the DOM, so unchanged text is never re-assigned each frame.
     this._cache = new Map();
     this.minimapZoom = 0.56;
+
+    // Extended HUD widgets (all optional: a missing element simply disables that widget).
+    this.compassEl = document.getElementById('minimap-compass');
+    this.wantedRing = document.getElementById('wanted-ring');
+    this.wantedRingArc = document.getElementById('wanted-ring-arc');
+    this.cashDeltaEl = document.getElementById('cash-delta');
+    this.notifyStack = document.getElementById('notify-stack');
+    this.weaponWheel = document.getElementById('weapon-wheel');
+    this.wheelSlots = Array.from(document.querySelectorAll('#weapon-wheel .wheel-slot'));
+    this.missionLog = document.getElementById('mission-log');
+    this.missionLogList = document.getElementById('mission-log-list');
+    this.statsPanel = document.getElementById('stats-panel');
+    this.speedoDial = document.getElementById('speedo-dial');
+    this.speedoDialCtx = this.speedoDial ? this.speedoDial.getContext('2d') : null;
+
+    // Animated cash counter: the shown value chases the real one; deltas pop up beside it.
+    this.cashShown = null;
+    this.cashDelta = 0;
+    this.cashDeltaTimer = 0;
+    // Notification stack driven by simulation time (deterministic in shot mode).
+    this.notifications = [];
+    this.lastTime = 0;
+    this.logVisible = false;
+    this.statsVisible = false;
+    this.wheelVisible = false;
+    this.reduceMotion = false;
+    this.needleAngle = 0;
+    this.lastStars = 0;
+    this.lastMissionLogKey = '';
+  }
+
+  // Push a notification. kind: 'info' | 'warn' | 'cash'. Duration in seconds of sim time.
+  notify(text, kind = 'info', duration = 3.5) {
+    if (!this.notifyStack) return;
+    // Collapse exact repeats into the existing entry instead of stacking copies.
+    const dup = this.notifications.find((n) => n.text === text && !n.fading);
+    if (dup) {
+      dup.until = this.lastTime + duration;
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = `notify ${kind === 'info' ? '' : kind}`.trim();
+    el.textContent = text;
+    this.notifyStack.appendChild(el);
+    this.notifications.push({ el, text, until: this.lastTime + duration, fading: false, removeAt: 0 });
+    while (this.notifications.length > 5) this._dropNotification(this.notifications[0], true);
+  }
+
+  _dropNotification(n, immediate = false) {
+    const i = this.notifications.indexOf(n);
+    if (i >= 0) this.notifications.splice(i, 1);
+    if (immediate || !n.el.parentNode) {
+      if (n.el.parentNode) n.el.parentNode.removeChild(n.el);
+    }
+  }
+
+  updateNotifications(time) {
+    for (const n of this.notifications.slice()) {
+      if (!n.fading && time >= n.until) {
+        n.fading = true;
+        n.removeAt = time + 0.45;
+        n.el.classList.add('fading');
+      } else if (n.fading && time >= n.removeAt) {
+        this._dropNotification(n, true);
+      }
+    }
+  }
+
+  toggleMissionLog(force = null) {
+    this.logVisible = force === null ? !this.logVisible : Boolean(force);
+    if (this.missionLog) this.missionLog.classList.toggle('active', this.logVisible);
+  }
+
+  toggleStats(force = null) {
+    this.statsVisible = force === null ? !this.statsVisible : Boolean(force);
+    if (this.statsPanel) this.statsPanel.classList.toggle('active', this.statsVisible);
+  }
+
+  setWeaponWheel(show, player) {
+    this.wheelVisible = Boolean(show);
+    if (!this.weaponWheel) return;
+    this.weaponWheel.classList.toggle('active', this.wheelVisible);
+    if (!this.wheelVisible || !player) return;
+    const current = player.getCurrentWeaponSpec().id;
+    for (const slot of this.wheelSlots) {
+      const id = slot.dataset.weapon;
+      slot.classList.toggle('selected', id === current);
+      const st = player.weaponsState ? player.weaponsState.find((w) => w.id === id) : null;
+      slot.classList.toggle('locked', Boolean(st && st.unlocked === false));
+    }
+  }
+
+  setStats(text) {
+    if (this.statsVisible) this._text(this.statsPanel, text);
+  }
+
+  // Wanted ring: a circular timer that empties as heat cools out of sight. `remaining` is 1 while
+  // the police can see the player and falls to 0 as the wanted level is about to drop.
+  updateWantedRing(stars, remaining) {
+    if (!this.wantedRing || !this.wantedRingArc) return;
+    this.wantedRing.classList.toggle('active', stars > 0);
+    if (stars <= 0) return;
+    const circumference = 69.115;
+    const r = Math.max(0, Math.min(1, remaining));
+    this.wantedRingArc.setAttribute('stroke-dashoffset', (circumference * (1 - r)).toFixed(2));
+    this.wantedRingArc.setAttribute('stroke', r > 0.99 ? '#ff4558' : r > 0.33 ? '#46b5ff' : '#5ef2a5');
+  }
+
+  // Animated cash: ease the shown value toward the real one and pop a +/- delta.
+  updateCash(dt, money) {
+    if (this.cashShown === null) {
+      this.cashShown = money;
+      this._lastMoney = money;
+    }
+    // Accumulate changes into one delta while it is on screen; a sign flip starts a new one.
+    if (money !== this._lastMoney) {
+      const change = money - this._lastMoney;
+      if (this.cashDeltaTimer <= 0 || Math.sign(change) !== Math.sign(this.cashDelta)) this.cashDelta = 0;
+      this.cashDelta += change;
+      this.cashDeltaTimer = 2.2;
+      this._lastMoney = money;
+    }
+    const diff = money - this.cashShown;
+    if (Math.abs(diff) < 1) {
+      this.cashShown = money;
+    } else {
+      // Close 8% of the gap per 1/60 s, at least $1, so large rewards count up visibly.
+      const step = Math.sign(diff) * Math.max(1, Math.abs(diff) * (1 - Math.pow(0.92, dt * 60)));
+      this.cashShown = Math.abs(step) >= Math.abs(diff) ? money : this.cashShown + step;
+    }
+    this._text(this.moneyEl, `$${Math.floor(this.cashShown).toLocaleString('en-US')}`);
+    if (this.cashDeltaEl) {
+      this.cashDeltaTimer = Math.max(0, this.cashDeltaTimer - dt);
+      const show = this.cashDeltaTimer > 0 && Math.abs(this.cashDelta) >= 1;
+      this.cashDeltaEl.classList.toggle('active', show);
+      this.cashDeltaEl.classList.toggle('neg', this.cashDelta < 0);
+      if (show) this._text(this.cashDeltaEl, `${this.cashDelta > 0 ? '+' : '−'}$${Math.abs(Math.round(this.cashDelta)).toLocaleString('en-US')}`);
+    }
+  }
+
+  // Analogue speedometer: arc scale with ticks, a redline zone and a damped needle.
+  drawSpeedoDial(dt, mph, maxMph, gear, rpm) {
+    const ctx = this.speedoDialCtx;
+    if (!ctx) return;
+    const w = this.speedoDial.width;
+    const h = this.speedoDial.height;
+    const cx = w * 0.5;
+    const cy = h * 0.92;
+    const r = Math.min(w * 0.44, h * 0.84);
+    const a0 = Math.PI * 1.05;
+    const a1 = Math.PI * 1.95;
+    ctx.clearRect(0, 0, w, h);
+    ctx.lineCap = 'round';
+    // Scale arc and redline.
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, a0, a1);
+    ctx.stroke();
+    ctx.strokeStyle = '#ff3b5c';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, a0 + (a1 - a0) * 0.82, a1);
+    ctx.stroke();
+    // RPM fill arc.
+    ctx.strokeStyle = '#ffae52';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r - 9, a0, a0 + (a1 - a0) * Math.max(0, Math.min(1, rpm / 100)));
+    ctx.stroke();
+    // Ticks every 20 mph with labels every 40.
+    ctx.fillStyle = 'rgba(255,240,224,0.75)';
+    ctx.font = '700 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let v = 0; v <= maxMph; v += 20) {
+      const a = a0 + (a1 - a0) * (v / maxMph);
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      ctx.strokeStyle = 'rgba(255,240,224,0.7)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + cos * (r - 4), cy + sin * (r - 4));
+      ctx.lineTo(cx + cos * (r + 4), cy + sin * (r + 4));
+      ctx.stroke();
+      if (v % 40 === 0) ctx.fillText(String(v), cx + cos * (r - 24), cy + sin * (r - 24));
+    }
+    // Needle with critically damped follow so it never jitters with gear changes.
+    const target = a0 + (a1 - a0) * Math.max(0, Math.min(1, mph / maxMph));
+    if (this.needleAngle === 0) this.needleAngle = a0;
+    this.needleAngle += (target - this.needleAngle) * (1 - Math.exp(-14 * dt));
+    ctx.strokeStyle = '#ff5a3c';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(this.needleAngle) * (r - 6), cy + Math.sin(this.needleAngle) * (r - 6));
+    ctx.stroke();
+    ctx.fillStyle = '#fff6ec';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#5ee6f2';
+    ctx.font = '900 20px sans-serif';
+    ctx.fillText(String(gear), cx, cy - r * 0.45);
+  }
+
+  // Story log: one line per mission with its state; rebuilt only when something changed.
+  updateMissionLog(missions) {
+    if (!this.missionLogList || !missions || !missions.getLog) return;
+    const log = missions.getLog();
+    const key = log.map((e) => `${e.id}:${e.state}`).join('|');
+    if (key === this.lastMissionLogKey) return;
+    this.lastMissionLogKey = key;
+    this.missionLogList.textContent = '';
+    for (const e of log) {
+      const row = document.createElement('div');
+      row.className = e.state === 'passed' ? 'done' : e.state === 'failed' ? 'failed' : e.state === 'active' ? '' : 'pending';
+      const mark = e.state === 'passed' ? '✓' : e.state === 'failed' ? '✗' : e.state === 'active' ? '▶' : '·';
+      row.textContent = `${mark} ${e.title}${e.state === 'passed' && e.reward ? `  +$${e.reward.toLocaleString('en-US')}` : ''}`;
+      this.missionLogList.appendChild(row);
+    }
+  }
+
+  // Turn queued combat hits into notifications (headshots, kills).
+  consumeCombatHits(combat) {
+    if (!combat || !combat.consumeHits) return;
+    for (const h of combat.consumeHits()) {
+      if (h.headshot && h.kind === 'kill') this.notify('HEADSHOT', 'warn', 1.6);
+      else if (h.kind === 'kill' && h.faction === 'gang') this.notify('Bishop crew member down', 'info', 2);
+    }
   }
 
   _text(el, value) {
@@ -115,13 +344,21 @@ export class HudOverlay {
     const toMapX = (wx) => cx + (wx - px) * scale;
     const toMapY = (wz) => cy + (wz - pz) * scale;
 
-    // Beach & Ocean on the east edge
+    // Rotate the world around the player so their heading always points up. The arrow is drawn
+    // after this transform is popped; radial blip clamping is rotation-invariant so it stays put.
+    const mapRot = Math.PI - player.heading;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-mapRot);
+    ctx.translate(-cx, -cy);
+
+    // Beach & Ocean on the east edge (extents overscan the canvas so rotation never shows gaps)
     const beachX = toMapX(CITY.beachStartX);
     const waterX = toMapX(CITY.waterStartX);
     ctx.fillStyle = '#73654d';
-    ctx.fillRect(beachX, 0, Math.max(0, waterX - beachX), h);
+    ctx.fillRect(beachX, -h, Math.max(0, waterX - beachX), h * 3);
     ctx.fillStyle = '#0e5c78';
-    ctx.fillRect(waterX, 0, w - waterX + 40, h);
+    ctx.fillRect(waterX, -h, w * 3, h * 3);
 
     // City blocks
     ctx.fillStyle = '#29344a';
@@ -136,10 +373,10 @@ export class HudOverlay {
     ctx.fillStyle = '#4c5870';
     const rw = CITY.roadWidth * scale;
     for (const rx of city.roadCentersX) {
-      ctx.fillRect(toMapX(rx) - rw * 0.5, 0, rw, h);
+      ctx.fillRect(toMapX(rx) - rw * 0.5, -h, rw, h * 3);
     }
     for (const rz of city.roadCentersZ) {
-      ctx.fillRect(0, toMapY(rz) - rw * 0.5, w, rw);
+      ctx.fillRect(-w, toMapY(rz) - rw * 0.5, w * 3, rw);
     }
 
     // West Annex: its blocks, short N-S streets and the staggered E-W streets.
@@ -259,10 +496,16 @@ export class HudOverlay {
       }
     }
 
-    // Player arrow at center
+    // Bus stops as small amber squares (handy waypoints when on foot).
+    if (city.busStops) {
+      ctx.fillStyle = '#ffb347';
+      for (const bs of city.busStops) ctx.fillRect(toMapX(bs.x) - 1.5, toMapY(bs.z) - 1.5, 3, 3);
+    }
+
+    // Player arrow at center: the map is heading-up, so the arrow always points straight up.
+    ctx.restore();
     ctx.save();
     ctx.translate(cx, cy);
-    ctx.rotate(-player.heading + Math.PI);
     ctx.beginPath();
     ctx.moveTo(0, -7);
     ctx.lineTo(5, 6);
@@ -277,12 +520,28 @@ export class HudOverlay {
     ctx.restore();
 
     ctx.restore();
+
+    // North indicator rides the rim: world north (−z) rotated by the same map rotation.
+    if (this.compassEl) {
+      const frameR = 88;
+      const nx = -Math.sin(mapRot);
+      const ny = -Math.cos(mapRot);
+      const left = frameR + nx * (frameR - 2);
+      const top = frameR + ny * (frameR - 2);
+      const style = `left:${left.toFixed(1)}px;top:${top.toFixed(1)}px;transform:translate(-50%,-50%)`;
+      if (this._cache.get(this.compassEl) !== style) {
+        this._cache.set(this.compassEl, style);
+        this.compassEl.setAttribute('style', style);
+      }
+    }
   }
 
   update(time, city, player, police, missions, vehicles, combat) {
-    // Wanted stars with red/blue strobe when active
+    const dt = Math.max(0, Math.min(0.25, time - this.lastTime));
+    this.lastTime = time;
+    // Wanted stars with red/blue strobe when active (steady red when reduced motion is on)
     const stars = police ? police.stars : 0;
-    const flashPhase = Math.floor(time * 5) % 2 === 0;
+    const flashPhase = this.reduceMotion ? true : Math.floor(time * 5) % 2 === 0;
     for (let i = 0; i < this.stars.length; i++) {
       const el = this.stars[i];
       el.classList.remove('active', 'flash-red', 'flash-blue');
@@ -291,6 +550,11 @@ export class HudOverlay {
         if (stars >= 2) el.classList.add(flashPhase ? 'flash-red' : 'flash-blue');
       }
     }
+    if (stars !== this.lastStars) {
+      if (stars > this.lastStars && stars >= 3 && this.lastStars < 3) this.notify('Roadblocks are going up', 'warn', 3);
+      else if (stars === 0 && this.lastStars > 0) this.notify('You lost the cops', 'info', 2.5);
+      this.lastStars = stars;
+    }
 
     // Wanted-level decay bar: drains while the player is out of police sight.
     const decay = police && police.getDecayFraction ? police.getDecayFraction() : 0;
@@ -298,9 +562,10 @@ export class HudOverlay {
       this.wantedDecay.classList.toggle('active', stars > 0);
       this.wantedDecayFill.style.width = `${Math.round((1 - decay) * 100)}%`;
     }
+    this.updateWantedRing(stars, 1 - decay);
 
-    // Money, weapon, district
-    this._text(this.moneyEl, `$${Math.floor(player.money).toLocaleString('en-US')}`);
+    // Money (animated), weapon, district
+    this.updateCash(dt, player.money);
     const wSpec = player.getCurrentWeaponSpec();
     const wState = player.getCurrentWeaponState();
     this._text(this.weaponNameEl, wSpec.name);
@@ -356,6 +621,8 @@ export class HudOverlay {
       this.speedoVal.textContent = String(mph);
       this.speedoGear.textContent = String(gear);
       this.speedoRpm.style.width = `${Math.round(rpm)}%`;
+      const maxMph = Math.max(80, Math.ceil(((player.vehicle.spec && player.vehicle.spec.maxSpeed) || 40) * 2.237 / 20) * 20);
+      this.drawSpeedoDial(dt, mph, maxMph, gear, rpm);
       this.crosshair.classList.remove('active');
     } else {
       this.speedoBox.classList.remove('active');
@@ -393,5 +660,11 @@ export class HudOverlay {
 
     // Minimap
     this.drawMinimap(city, player, police, missions, vehicles);
+
+    // Notifications, mission log, combat feed
+    this.consumeCombatHits(combat);
+    this.updateNotifications(time);
+    if (this.logVisible) this.updateMissionLog(missions);
+    if (this.wheelVisible) this.setWeaponWheel(true, player);
   }
 }

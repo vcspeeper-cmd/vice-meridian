@@ -78,6 +78,37 @@ export const COMBAT_CFG = {
   panicRadius: 38,
   npcBaseAccuracy: 0.32,
   npcDamage: 9,
+  // Hits above this height (m above the target's feet) inside the inner cylinder are headshots.
+  headHeight: 1.55,
+  headshotMultiplier: 2.0,
+  // Melee lunge duration (s); the distance comes from how far the target is.
+  lungeTime: 0.12,
+  // Exponential rate (1/s) at which recoil kick is paid back to the camera.
+  recoilRecovery: 9,
+  maxCasings: 48,
+  hitQueueSize: 16,
+};
+
+// Difficulty scales the numbers that decide how hard a fight or a chase is.
+export const DIFFICULTY = {
+  easy: { id: 'easy', npcAccuracy: 0.7, npcDamage: 0.7, playerDamage: 1.25, heatGain: 0.75, heatCool: 1.4, missionTime: 1.25, copSpeed: 0.9 },
+  normal: { id: 'normal', npcAccuracy: 1, npcDamage: 1, playerDamage: 1, heatGain: 1, heatCool: 1, missionTime: 1, copSpeed: 1 },
+  hard: { id: 'hard', npcAccuracy: 1.3, npcDamage: 1.3, playerDamage: 0.85, heatGain: 1.3, heatCool: 0.7, missionTime: 0.85, copSpeed: 1.08 },
+};
+
+// Procedural-generation knobs for the city planner and its street furniture.
+export const CITY_GEN = {
+  busStopEvery: 3,
+  acMinHeight: 9,
+  acMaxPerRoof: 3,
+  antennaMinHeight: 40,
+  spatialCellSize: 24,
+  districts: {
+    downtown: { minHeight: 28, maxHeight: 62, palettes: [2, 3, 0] },
+    residential: { minHeight: 11, maxHeight: 28, palettes: [0, 1, 2, 3, 4, 5, 6, 7] },
+    industrial: { minHeight: 8, maxHeight: 15, palettes: [6] },
+    waterfront: { minHeight: 15, maxHeight: 34, palettes: [0, 1, 7, 2] },
+  },
 };
 
 // Wanted heat model. Each crime adds heat; stars are the thresholds the heat has crossed.
@@ -286,6 +317,7 @@ export const WEAPONS = [
     unlockedByDefault: true,
     unlockCost: 0,
     hotkey: 2,
+    headshotMult: 2.5,
   },
   {
     id: 'smg',
@@ -304,6 +336,7 @@ export const WEAPONS = [
     unlockedByDefault: false,
     unlockCost: 1500,
     hotkey: 3,
+    headshotMult: 1.6,
   },
   {
     id: 'fists',
@@ -340,6 +373,26 @@ export const PLAYER_CFG = {
   healthRegenBelow: 30,
   healthRegenRate: 1.5,
   fallDamageSpeed: 14,
+  // Walk / run / sprint tiers: a partial stick deflection walks, a full push runs at walkSpeed,
+  // and sprint burns stamina; with the tank empty, sprint drops back to a run.
+  slowWalkSpeed: 2.6,
+  staminaMax: 5,
+  staminaDrain: 1,
+  staminaRegen: 0.8,
+  staminaResume: 1.2,
+  // Grace periods: jump still allowed this long after leaving a ledge, and a jump pressed this
+  // long before landing still fires on touchdown.
+  coyoteTime: 0.12,
+  jumpBufferTime: 0.15,
+  // Calm regeneration: out of combat with no wanted level, health refills up to this cap.
+  calmRegenCap: 65,
+  calmRegenRate: 3,
+  calmDelay: 6,
+  // A single hit at least this big knocks the player down for downedTime seconds.
+  downedThreshold: 24,
+  downedTime: 1.1,
+  // Capsule: the player can step onto boxes no taller than this above their feet.
+  stepHeight: 0.4,
 };
 
 export const POLICE_CFG = {
@@ -400,4 +453,133 @@ export function pickTrafficClass(rng) {
     if (roll <= 0) return id;
   }
   return entries[entries.length - 1][0];
+}
+
+// Per-star wanted behaviour: how fast heat cools out of sight, how many units respond and what
+// they are allowed to do. Index = star count.
+export const WANTED_LEVELS = [
+  { stars: 0, coolRate: 0, pursuitCars: 0, officers: 0, roadblocks: 0, decaySeconds: 0 },
+  { stars: 1, coolRate: 0.5, pursuitCars: 1, officers: 0, roadblocks: 0, decaySeconds: 14 },
+  { stars: 2, coolRate: 0.4, pursuitCars: 2, officers: 2, roadblocks: 0, decaySeconds: 18 },
+  { stars: 3, coolRate: 0.33, pursuitCars: 3, officers: 3, roadblocks: 1, decaySeconds: 24 },
+  { stars: 4, coolRate: 0.25, pursuitCars: 4, officers: 4, roadblocks: 2, decaySeconds: 32 },
+  { stars: 5, coolRate: 0.18, pursuitCars: 4, officers: 5, roadblocks: 2, decaySeconds: 42 },
+];
+
+// Police dispatcher limits: how much can exist and how much may spawn per second, so the
+// frame stays cheap no matter how big the chase gets.
+export const POLICE_BUDGET = {
+  maxActiveUnits: 9,
+  spawnTokensPerSecond: 0.5,
+  maxTokens: 3,
+  costCar: 1,
+  costOfficer: 0.5,
+  costRoadblock: 2,
+  despawnDistance: 190,
+  predictionSeconds: 1.4,
+  repathInterval: 1.5,
+};
+
+// Hourly colour ramps for things the sky keyframes do not cover: window glow, street lamps and
+// neon. Each ramp is sampled with sampleRamp(ramp, timeOfDay).
+export const COLOR_RAMPS = {
+  windowGlow: [
+    { t: 0.0, color: 0xffc070, intensity: 1.0 },
+    { t: 0.28, color: 0xffd9a0, intensity: 0.35 },
+    { t: 0.5, color: 0xffffff, intensity: 0.15 },
+    { t: 0.62, color: 0xffb870, intensity: 0.5 },
+    { t: 0.8, color: 0xffa860, intensity: 0.9 },
+    { t: 1.0, color: 0xffc070, intensity: 1.0 },
+  ],
+  streetLamp: [
+    { t: 0.0, color: 0xffd280, intensity: 1.0 },
+    { t: 0.3, color: 0x8a8070, intensity: 0.0 },
+    { t: 0.58, color: 0x8a8070, intensity: 0.0 },
+    { t: 0.7, color: 0xffd280, intensity: 0.8 },
+    { t: 1.0, color: 0xffd280, intensity: 1.0 },
+  ],
+  neon: [
+    { t: 0.0, color: 0xff3b9a, intensity: 1.0 },
+    { t: 0.4, color: 0xff3b9a, intensity: 0.45 },
+    { t: 0.62, color: 0xff3b9a, intensity: 0.8 },
+    { t: 1.0, color: 0xff3b9a, intensity: 1.0 },
+  ],
+};
+
+export function sampleRamp(ramp, t) {
+  const tt = ((t % 1) + 1) % 1;
+  for (let i = 0; i < ramp.length - 1; i++) {
+    const a = ramp[i];
+    const b = ramp[i + 1];
+    if (tt >= a.t && tt <= b.t) {
+      const k = b.t > a.t ? (tt - a.t) / (b.t - a.t) : 0;
+      const ch = (c, s) => (c >> s) & 255;
+      const mixCh = (s) => Math.round(ch(a.color, s) * (1 - k) + ch(b.color, s) * k);
+      return { color: (mixCh(16) << 16) | (mixCh(8) << 8) | mixCh(0), intensity: a.intensity + (b.intensity - a.intensity) * k };
+    }
+  }
+  const last = ramp[ramp.length - 1];
+  return { color: last.color, intensity: last.intensity };
+}
+
+// Camera rigs: on-foot and driving offsets, plus aim and cinematic presets.
+export const CAMERA_PRESETS = {
+  foot: { dist: 5.2, height: 2.3, lookHeight: 1.5, fov: 62, lag: 10 },
+  aim: { dist: 3.0, height: 1.9, lookHeight: 1.6, fov: 52, lag: 18, shoulder: 0.7 },
+  drive: { dist: 9.5, height: 3.6, lookHeight: 1.2, fov: 64, lag: 6 },
+  driveFast: { dist: 11.2, height: 3.3, lookHeight: 1.1, fov: 74, lag: 5 },
+  cinematic: { dist: 16, height: 6, lookHeight: 2, fov: 45, lag: 2 },
+};
+
+// Quality tiers. The frame-budget guard in main.js steps down through these when frames run
+// long, and the settings menu can pin one.
+export const QUALITY_TIERS = {
+  low: { id: 'low', pixelRatio: 0.75, shadowMapSize: 512, shadows: false, drawDistance: 340, post: false, glow: false, pedCount: 40, trafficScale: 0.6 },
+  medium: { id: 'medium', pixelRatio: 1, shadowMapSize: 1024, shadows: true, drawDistance: 520, post: true, glow: false, pedCount: 64, trafficScale: 0.85 },
+  high: { id: 'high', pixelRatio: 1.5, shadowMapSize: 2048, shadows: true, drawDistance: 900, post: true, glow: true, pedCount: 86, trafficScale: 1 },
+};
+export const QUALITY_ORDER = ['low', 'medium', 'high'];
+
+// Frame-budget guard: if the smoothed frame time stays above `downshiftMs` for `windowFrames`,
+// drop one tier; if it stays below `upshiftMs` for twice as long, climb one tier.
+export const FRAME_BUDGET = {
+  targetMs: 16.7,
+  downshiftMs: 26,
+  upshiftMs: 12,
+  windowFrames: 90,
+  smoothing: 0.08,
+};
+
+// Input defaults: stick deadzones, look sensitivity and the input buffer window.
+export const INPUT_CFG = {
+  stickDeadzone: 0.18,
+  triggerDeadzone: 0.06,
+  mouseSensitivity: 0.0022,
+  stickLookSpeed: 2.6,
+  bufferSeconds: 0.15,
+};
+
+export const AUDIO_CFG = {
+  busLevels: { sfx: 0.9, vehicle: 0.85, ui: 0.6, music: 0.45, ambience: 0.8 },
+  defaultVolume: 0.8,
+};
+
+// Recursively freeze an object graph so no module can mutate shared tunables by accident.
+// Getter-backed properties (CITY.pitch etc.) are left as getters; their results are numbers.
+export function deepFreeze(obj, seen = new Set()) {
+  if (obj === null || typeof obj !== 'object' || seen.has(obj)) return obj;
+  seen.add(obj);
+  for (const key of Reflect.ownKeys(obj)) {
+    const desc = Object.getOwnPropertyDescriptor(obj, key);
+    if (desc && 'value' in desc) deepFreeze(desc.value, seen);
+  }
+  return Object.freeze(obj);
+}
+
+for (const table of [
+  CITY, TIME_OF_DAY, TRAFFIC_CFG, PED_CFG, COMBAT_CFG, DIFFICULTY, CITY_GEN, WANTED_CFG, SAVE_CFG, PALETTE,
+  DISTRICTS, VEHICLE_SPECS, WEAPONS, PLAYER_CFG, POLICE_CFG, WANTED_LEVELS, POLICE_BUDGET, COLOR_RAMPS,
+  CAMERA_PRESETS, QUALITY_TIERS, QUALITY_ORDER, FRAME_BUDGET, INPUT_CFG, AUDIO_CFG,
+]) {
+  deepFreeze(table);
 }

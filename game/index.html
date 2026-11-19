@@ -292,9 +292,16 @@
   #loading.done { opacity: 0; pointer-events: none; }
   #loading-title { font-size: 34px; font-weight: 900; letter-spacing: 8px; color: #fff3df; text-shadow: 0 4px 18px rgba(40,10,40,0.7); }
   #loading-track { width: 240px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.2); overflow: hidden; }
-  #loading-fill { width: 30%; height: 100%; background: linear-gradient(90deg, #ffcf5c, #ff4070); animation: loadslide 1.1s ease-in-out infinite alternate; }
+  #loading-fill { width: 0%; height: 100%; background: linear-gradient(90deg, #ffcf5c, #ff4070); transition: width 0.18s ease-out; }
   #loading-step { font-size: 11px; letter-spacing: 3px; text-transform: uppercase; color: #ffe2c4; }
-  @keyframes loadslide { from { transform: translateX(-30%); } to { transform: translateX(260%); } }
+  #loading-pct { font-size: 12px; font-weight: 800; letter-spacing: 2px; color: #fff3df; font-variant-numeric: tabular-nums; }
+  #loading-modules {
+    list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, auto);
+    gap: 3px 14px; font-size: 10px; letter-spacing: 1.4px; text-transform: uppercase; color: rgba(255,236,214,0.42);
+  }
+  #loading-modules li.done { color: #ffe2c4; }
+  #loading-modules li.done::before { content: "✓ "; color: #5ef2a5; }
+  #loading-modules li.active { color: #ffcf5c; }
 
   /* Hit marker, wanted decay and transient toast */
   #hitmarker {
@@ -325,6 +332,115 @@
     color: #ffd9b3; background: transparent; border: 1px solid rgba(255,180,110,0.55); border-radius: 6px; padding: 8px 20px;
   }
   #continue-btn.active { display: inline-block; }
+
+  /* Title backdrop: a live 2D skyline/sun scene painted under the title copy. */
+  #title-backdrop {
+    position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 42%;
+    pointer-events: none; z-index: 0; opacity: 0.85;
+  }
+  #overlay > *:not(#title-backdrop) { position: relative; z-index: 1; }
+  #overlay > #title-credits { position: absolute; }
+
+  /* Title tabs: settings, controls, shortcuts, accessibility */
+  #front-tabs { display: flex; gap: 4px; margin-top: 22px; }
+  .front-tab {
+    cursor: pointer; pointer-events: auto; font-size: 11px; font-weight: 800; letter-spacing: 1.8px; text-transform: uppercase;
+    color: #d8cee6; background: rgba(20,14,32,0.66); border: 1px solid rgba(255,180,110,0.25);
+    border-radius: 5px 5px 0 0; padding: 7px 14px;
+  }
+  .front-tab[aria-selected="true"] { color: #160e20; background: linear-gradient(90deg, #ff9947, #ffcf5c); border-color: transparent; }
+  .front-tab:focus-visible, #play-btn:focus-visible, #continue-btn:focus-visible { outline: 2px solid #5ef0f0; outline-offset: 2px; }
+  #front-panels {
+    width: min(640px, calc(100vw - 40px)); min-height: 178px; max-height: 40vh; overflow: auto;
+    background: rgba(16,12,28,0.82); border: 1px solid rgba(255,180,110,0.25); border-radius: 0 6px 6px 6px;
+    padding: 14px 18px; font-size: 12px; color: #e6dcf0; pointer-events: auto;
+  }
+  .front-panel { display: none; }
+  .front-panel.active { display: block; }
+  #settings-form { display: grid; grid-template-columns: 150px 1fr 54px; gap: 9px 12px; align-items: center; }
+  #settings-form label { font-weight: 700; letter-spacing: 1px; text-transform: uppercase; font-size: 11px; color: #ffd9b3; }
+  #settings-form select, #settings-form input[type="range"] { width: 100%; accent-color: #ff9947; }
+  #settings-form select {
+    background: #1d1530; color: #fff6ec; border: 1px solid rgba(255,180,110,0.4); border-radius: 4px; padding: 3px 6px; font-size: 12px;
+  }
+  #settings-form output { font-variant-numeric: tabular-nums; color: #5ef0f0; font-weight: 800; text-align: right; }
+  #settings-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+  .mini-btn {
+    cursor: pointer; font-size: 10px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase;
+    background: transparent; color: #ffd9b3; border: 1px solid rgba(255,180,110,0.5); border-radius: 4px; padding: 5px 12px;
+  }
+  .ref-table { width: 100%; border-collapse: collapse; }
+  .ref-table th { text-align: left; font-size: 10px; letter-spacing: 1.8px; text-transform: uppercase; color: #ff9c54; padding: 0 6px 6px; }
+  .ref-table td { padding: 4px 6px; border-top: 1px solid rgba(255,255,255,0.07); }
+  .ref-table td:first-child { color: #fff6ec; font-weight: 700; }
+  kbd {
+    display: inline-block; min-width: 20px; text-align: center; font-family: inherit; font-size: 11px; font-weight: 800;
+    color: #160e20; background: #ffd9b3; border-radius: 3px; padding: 1px 5px; box-shadow: 0 2px 0 #b9875e; margin-right: 2px;
+  }
+  #a11y-note p { margin: 0 0 8px; line-height: 1.5; }
+
+  /* HUD extras: notification stack, cash delta, weapon wheel, speedo dial, wanted ring, mission log, stats */
+  #notify-stack {
+    position: absolute; top: 74px; left: 24px; width: 280px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .notify {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.5px; color: #fff6ec;
+    background: linear-gradient(90deg, rgba(18,14,32,0.9), rgba(18,14,32,0.6));
+    border-left: 3px solid #5ef0f0; border-radius: 4px; padding: 7px 10px;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .notify.warn { border-left-color: #ff4558; }
+  .notify.cash { border-left-color: #5ef2a5; }
+  .notify.fading { opacity: 0; transform: translateX(-16px); }
+  #cash-delta {
+    font-size: 15px; font-weight: 800; color: #5ef2a5; text-shadow: 0 2px 6px rgba(0,0,0,0.85);
+    opacity: 0; transition: opacity 0.3s ease; font-variant-numeric: tabular-nums;
+  }
+  #cash-delta.active { opacity: 1; }
+  #cash-delta.neg { color: #ff6a7a; }
+  #wanted-ring { position: absolute; top: 2px; left: -34px; width: 28px; height: 28px; display: none; }
+  #wanted-ring.active { display: block; }
+  #wanted-row { position: relative; }
+  #speedo-dial { width: 120px; height: 72px; display: block; margin-bottom: -6px; }
+  #weapon-wheel {
+    position: absolute; top: 50%; left: 50%; width: 260px; height: 260px; transform: translate(-50%, -50%);
+    border-radius: 50%; display: none;
+    background: radial-gradient(circle, rgba(14,10,24,0.2) 28%, rgba(14,10,24,0.82) 30%, rgba(14,10,24,0.82) 70%, rgba(14,10,24,0) 71%);
+  }
+  #weapon-wheel.active { display: block; }
+  .wheel-slot {
+    position: absolute; width: 86px; margin-left: -43px; margin-top: -14px; text-align: center;
+    font-size: 11px; font-weight: 800; letter-spacing: 1.2px; color: rgba(255,240,224,0.6);
+  }
+  .wheel-slot.selected { color: #ffcf5c; text-shadow: 0 0 10px rgba(255,170,60,0.8); }
+  .wheel-slot.locked { color: rgba(255,255,255,0.22); }
+  #mission-log {
+    position: absolute; top: 74px; right: 24px; margin-top: 150px; width: 220px; display: none;
+    background: rgba(14,12,24,0.78); border: 1px solid rgba(255,180,110,0.22); border-radius: 6px; padding: 8px 10px;
+    font-size: 11px; line-height: 1.6;
+  }
+  #mission-log.active { display: block; }
+  #mission-log h3 { margin: 0 0 4px; font-size: 10px; letter-spacing: 2px; color: #ff9c54; }
+  #mission-log .done { color: #5ef2a5; }
+  #mission-log .failed { color: #ff6a7a; }
+  #mission-log .pending { color: rgba(255,240,224,0.5); }
+  #stats-panel {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); display: none;
+    font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace; color: #c9f7ff;
+    background: rgba(8,10,18,0.72); border-radius: 4px; padding: 4px 10px; white-space: pre;
+  }
+  #stats-panel.active { display: block; }
+  #pause-hint { font-size: 11px; letter-spacing: 2px; color: rgba(255,230,210,0.66); margin-top: 6px; display: none; }
+  body.reduce-motion #title-backdrop { display: none; }
+  body.reduce-motion .notify, body.reduce-motion #hud { transition: none; }
+  body.high-contrast #hud { filter: contrast(1.25) saturate(1.15); }
+  body.large-hud #hud { zoom: 1.18; }
+  @media (max-width: 760px) {
+    #front-panels { font-size: 11px; }
+    #settings-form { grid-template-columns: 110px 1fr 44px; }
+    #notify-stack, #mission-log { display: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -347,10 +463,16 @@
 
     <div id="hud-top-right">
       <div id="wanted-row" aria-label="Wanted level">
+        <svg id="wanted-ring" viewBox="0 0 28 28" aria-hidden="true">
+          <circle cx="14" cy="14" r="11" fill="none" stroke="rgba(255,255,255,0.16)" stroke-width="3"></circle>
+          <circle id="wanted-ring-arc" cx="14" cy="14" r="11" fill="none" stroke="#46b5ff" stroke-width="3"
+            stroke-dasharray="69.115" stroke-dashoffset="0" transform="rotate(-90 14 14)" stroke-linecap="round"></circle>
+        </svg>
         <span class="star">★</span><span class="star">★</span><span class="star">★</span><span class="star">★</span><span class="star">★</span>
       </div>
       <div id="wanted-decay"><div id="wanted-decay-fill"></div></div>
       <div id="money-box">$1,250</div>
+      <div id="cash-delta" aria-live="polite"></div>
       <div id="weapon-box">
         <span id="weapon-name">9MM CORAL</span>
         <span id="weapon-ammo">15 / 90</span>
@@ -381,6 +503,7 @@
     </div>
 
     <div id="speedo-box">
+      <canvas id="speedo-dial" width="240" height="144" aria-hidden="true"></canvas>
       <div id="speedo-car">VANTABLACK GT</div>
       <div id="speedo-main">
         <span id="speedo-val">0</span>
@@ -393,6 +516,14 @@
     <div id="crosshair"></div>
     <div id="hitmarker"></div>
     <div id="prompt-toast"></div>
+    <div id="notify-stack" aria-live="polite"></div>
+    <div id="mission-log" aria-label="Mission log"><h3>STORY LOG</h3><div id="mission-log-list"></div></div>
+    <div id="weapon-wheel" aria-label="Weapon wheel">
+      <div class="wheel-slot" data-weapon="fists" style="left:50%;top:16%">FISTS</div>
+      <div class="wheel-slot" data-weapon="pistol" style="left:82%;top:72%">PISTOL</div>
+      <div class="wheel-slot" data-weapon="smg" style="left:18%;top:72%">SMG</div>
+    </div>
+    <div id="stats-panel"></div>
   </div>
 
   <div id="wasted-banner">
@@ -407,36 +538,377 @@
     <p class="respawn-count" id="busted-count"></p>
   </div>
 
-  <div id="loading">
+  <div id="loading" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Loading">
     <div id="loading-title">VICE MERIDIAN</div>
     <div id="loading-track"><div id="loading-fill"></div></div>
-    <div id="loading-step">Generating Marisol Bay</div>
+    <div id="loading-pct">0%</div>
+    <div id="loading-step">Loading modules</div>
+    <ul id="loading-modules">
+      <li data-step="modules">Modules</li><li data-step="textures">Textures</li><li data-step="render">Renderer</li><li data-step="city">City</li>
+      <li data-step="vehicles">Traffic</li><li data-step="peds">Pedestrians</li><li data-step="player">Player</li><li data-step="police">Police</li>
+      <li data-step="combat">Combat</li><li data-step="missions">Missions</li><li data-step="hud">HUD</li><li data-step="ready">Ready</li>
+    </ul>
   </div>
 
   <div id="overlay">
+    <canvas id="title-backdrop" aria-hidden="true"></canvas>
     <div id="title-kicker">GOLDEN HOUR SANDBOX</div>
     <h1 id="title-logo">VICE MERIDIAN</h1>
     <p id="title-sub">Roam Marisol Bay as Rico Vela. Boost custom cruisers, outrun the Meridian PD, run jobs for fixer Tessa Marlow, and settle scores along the docks.</p>
     <button id="play-btn" type="button">PLAY VICE MERIDIAN</button>
     <button id="continue-btn" type="button">CONTINUE SAVED GAME</button>
-    <div id="key-grid">
-      <span><b>WASD</b> Walk / Drive</span>
-      <span><b>Shift</b> Sprint / Boost</span>
-      <span><b>Space</b> Jump / Handbrake</span>
-      <span><b>F</b> Enter / Exit Car</span>
-      <span><b>Click</b> Fire Weapon</span>
-      <span><b>E</b> Start Mission</span>
-      <span><b>1 / 2 / 3</b> Fists / Pistol / SMG</span>
-      <span><b>Q</b> Melee Punch</span>
-      <span><b>H</b> Horn</span>
-      <span><b>P / Esc</b> Pause</span>
-      <span><b>K</b> Save Game</span>
-      <span><b>Pad</b> Sticks + Triggers</span>
+    <div id="pause-hint">P · ESC · ENTER TO RESUME</div>
+    <div id="front-tabs" role="tablist">
+      <button class="front-tab" role="tab" type="button" aria-selected="true" data-panel="panel-settings">Settings</button>
+      <button class="front-tab" role="tab" type="button" aria-selected="false" data-panel="panel-controls">Controls</button>
+      <button class="front-tab" role="tab" type="button" aria-selected="false" data-panel="panel-shortcuts">Shortcuts</button>
+      <button class="front-tab" role="tab" type="button" aria-selected="false" data-panel="panel-a11y">Accessibility</button>
+    </div>
+    <div id="front-panels">
+      <section id="panel-settings" class="front-panel active" role="tabpanel">
+        <form id="settings-form" onsubmit="return false">
+          <label for="set-quality">Quality preset</label>
+          <select id="set-quality" name="quality">
+            <option value="auto">Auto (frame guard)</option><option value="low">Low</option>
+            <option value="medium">Medium</option><option value="high">High</option>
+          </select><output id="out-quality">AUTO</output>
+          <label for="set-fov">Field of view</label>
+          <input id="set-fov" name="fov" type="range" min="50" max="95" step="1"><output id="out-fov">62</output>
+          <label for="set-sens">Mouse sensitivity</label>
+          <input id="set-sens" name="sensitivity" type="range" min="0.2" max="3" step="0.05"><output id="out-sens">1.00</output>
+          <label for="set-invert">Invert Y axis</label>
+          <select id="set-invert" name="invertY"><option value="0">Off</option><option value="1">On</option></select><output id="out-invert">OFF</output>
+          <label for="set-volume">Master volume</label>
+          <input id="set-volume" name="volume" type="range" min="0" max="100" step="1"><output id="out-volume">80</output>
+          <label for="set-difficulty">Difficulty</label>
+          <select id="set-difficulty" name="difficulty">
+            <option value="easy">Easy — slower heat, weaker shots</option><option value="normal">Normal</option>
+            <option value="hard">Hard — faster heat, sharper cops</option>
+          </select><output id="out-difficulty">NORMAL</output>
+          <div id="settings-actions">
+            <button class="mini-btn" id="settings-reset" type="button">Reset defaults</button>
+          </div>
+        </form>
+      </section>
+      <section id="panel-controls" class="front-panel" role="tabpanel">
+        <table class="ref-table">
+          <thead><tr><th>Action</th><th>Keyboard / Mouse</th><th>Gamepad</th></tr></thead>
+          <tbody>
+            <tr><td>Move / drive</td><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>Left stick</td></tr>
+            <tr><td>Look</td><td>Mouse (click to lock)</td><td>Right stick</td></tr>
+            <tr><td>Sprint / boost</td><td><kbd>Shift</kbd></td><td>Left stick press</td></tr>
+            <tr><td>Jump / handbrake</td><td><kbd>Space</kbd></td><td>A / Cross</td></tr>
+            <tr><td>Enter / exit car</td><td><kbd>F</kbd></td><td>Y / Triangle</td></tr>
+            <tr><td>Fire / accelerate</td><td>Left click</td><td>Right trigger</td></tr>
+            <tr><td>Aim / brake</td><td>Right click</td><td>Left trigger</td></tr>
+            <tr><td>Melee punch</td><td><kbd>Q</kbd></td><td>B / Circle</td></tr>
+            <tr><td>Reload</td><td><kbd>R</kbd></td><td>X / Square</td></tr>
+            <tr><td>Cycle weapon</td><td><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / wheel</td><td>Bumpers</td></tr>
+            <tr><td>Horn</td><td><kbd>H</kbd></td><td>Right stick press</td></tr>
+            <tr><td>Start mission</td><td><kbd>E</kbd></td><td>D-pad up</td></tr>
+            <tr><td>Radio blip</td><td><kbd>.</kbd></td><td>D-pad left / right</td></tr>
+          </tbody>
+        </table>
+      </section>
+      <section id="panel-shortcuts" class="front-panel" role="tabpanel">
+        <table class="ref-table">
+          <thead><tr><th>Shortcut</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>P</kbd> / <kbd>Esc</kbd></td><td>Pause and open this menu</td></tr>
+            <tr><td><kbd>Enter</kbd></td><td>Start or resume</td></tr>
+            <tr><td><kbd>K</kbd></td><td>Quick save (position, cash, wanted level, story)</td></tr>
+            <tr><td><kbd>Tab</kbd> (hold)</td><td>Weapon wheel</td></tr>
+            <tr><td><kbd>L</kbd></td><td>Toggle the story mission log</td></tr>
+            <tr><td><kbd>F3</kbd></td><td>Frame stats (fps, draw calls, triangles, quality tier)</td></tr>
+            <tr><td><kbd>C</kbd></td><td>Look behind</td></tr>
+            <tr><td><kbd>M</kbd></td><td>Mute / unmute</td></tr>
+          </tbody>
+        </table>
+      </section>
+      <section id="panel-a11y" class="front-panel" role="tabpanel">
+        <div id="a11y-note">
+          <p>Every menu control is a native button, select or slider, reachable with <kbd>Tab</kbd> and operable with <kbd>Enter</kbd>/<kbd>Space</kbd>. Mission text, cash changes and notifications are announced through polite live regions.</p>
+          <p>The wanted level is shown by star count and by the ring beside it, not by colour alone. Pursuit strobes switch to a steady state when reduced motion is on.</p>
+          <form id="a11y-form" onsubmit="return false">
+            <label><input type="checkbox" id="set-reduce-motion"> Reduce motion (no title animation, no camera shake, no strobing)</label><br>
+            <label><input type="checkbox" id="set-contrast"> High-contrast HUD</label><br>
+            <label><input type="checkbox" id="set-large-hud"> Larger HUD text</label>
+          </form>
+        </div>
+      </section>
     </div>
     <div id="title-hint">Click to start · audio unlocks on first click</div>
     <div id="title-credits">Code, textures and sound synthesised in-browser · rendering by three.js r160</div>
   </div>
 </div>
+<script>
+// Front end for VICE MERIDIAN: settings persistence, menu tabs, the loading progress bar and the
+// animated title backdrop. Plain script (not a module) so it runs before the game modules load and
+// main.js can read window.VMFront the moment it boots.
+(function () {
+  'use strict';
+  var SETTINGS_KEY = 'vice-meridian-settings-v1';
+  var DEFAULTS = {
+    quality: 'auto', fov: 62, sensitivity: 1, invertY: false, volume: 80, difficulty: 'normal',
+    reduceMotion: false, highContrast: false, largeHud: false,
+  };
+  var QUALITY = ['auto', 'low', 'medium', 'high'];
+  var DIFFICULTY = ['easy', 'normal', 'hard'];
+  var params = new URLSearchParams(window.location.search);
+  var shotMode = params.has('shot');
+
+  function clampNum(v, lo, hi, fallback) {
+    var n = Number(v);
+    if (!isFinite(n)) return fallback;
+    return n < lo ? lo : n > hi ? hi : n;
+  }
+
+  // Validate every field so a hand-edited or stale localStorage entry can never break the game.
+  function sanitize(raw) {
+    var s = {};
+    raw = raw && typeof raw === 'object' ? raw : {};
+    s.quality = QUALITY.indexOf(raw.quality) >= 0 ? raw.quality : DEFAULTS.quality;
+    s.fov = Math.round(clampNum(raw.fov, 50, 95, DEFAULTS.fov));
+    s.sensitivity = Math.round(clampNum(raw.sensitivity, 0.2, 3, DEFAULTS.sensitivity) * 100) / 100;
+    s.invertY = raw.invertY === true || raw.invertY === '1' || raw.invertY === 1;
+    s.volume = Math.round(clampNum(raw.volume, 0, 100, DEFAULTS.volume));
+    s.difficulty = DIFFICULTY.indexOf(raw.difficulty) >= 0 ? raw.difficulty : DEFAULTS.difficulty;
+    s.reduceMotion = raw.reduceMotion === true;
+    s.highContrast = raw.highContrast === true;
+    s.largeHud = raw.largeHud === true;
+    return s;
+  }
+
+  function loadSettings() {
+    // Shots must never depend on what a previous session stored.
+    if (shotMode) return sanitize(DEFAULTS);
+    try {
+      var raw = window.localStorage.getItem(SETTINGS_KEY);
+      return sanitize(raw ? JSON.parse(raw) : DEFAULTS);
+    } catch (e) {
+      return sanitize(DEFAULTS);
+    }
+  }
+
+  var settings = loadSettings();
+  var listeners = [];
+
+  function persist() {
+    if (shotMode) return;
+    try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* storage disabled: keep the in-memory copy */ }
+  }
+
+  function applyBodyClasses() {
+    document.body.classList.toggle('reduce-motion', settings.reduceMotion);
+    document.body.classList.toggle('high-contrast', settings.highContrast);
+    document.body.classList.toggle('large-hud', settings.largeHud);
+  }
+
+  function emit() {
+    applyBodyClasses();
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i](settings); } catch (e) { console.error(e); }
+    }
+  }
+
+  function update(patch) {
+    var next = {};
+    for (var k in settings) next[k] = settings[k];
+    for (var p in patch) next[p] = patch[p];
+    settings = sanitize(next);
+    persist();
+    syncForm();
+    emit();
+  }
+
+  function byId(id) { return document.getElementById(id); }
+
+  function syncForm() {
+    var q = byId('set-quality'); if (!q) return;
+    q.value = settings.quality; byId('out-quality').textContent = settings.quality.toUpperCase();
+    byId('set-fov').value = settings.fov; byId('out-fov').textContent = String(settings.fov);
+    byId('set-sens').value = settings.sensitivity; byId('out-sens').textContent = settings.sensitivity.toFixed(2);
+    byId('set-invert').value = settings.invertY ? '1' : '0'; byId('out-invert').textContent = settings.invertY ? 'ON' : 'OFF';
+    byId('set-volume').value = settings.volume; byId('out-volume').textContent = String(settings.volume);
+    byId('set-difficulty').value = settings.difficulty; byId('out-difficulty').textContent = settings.difficulty.toUpperCase();
+    byId('set-reduce-motion').checked = settings.reduceMotion;
+    byId('set-contrast').checked = settings.highContrast;
+    byId('set-large-hud').checked = settings.largeHud;
+  }
+
+  function wireForm() {
+    var bind = function (id, evt, fn) { var el = byId(id); if (el) el.addEventListener(evt, fn); };
+    bind('set-quality', 'change', function (e) { update({ quality: e.target.value }); });
+    bind('set-fov', 'input', function (e) { update({ fov: e.target.value }); });
+    bind('set-sens', 'input', function (e) { update({ sensitivity: e.target.value }); });
+    bind('set-invert', 'change', function (e) { update({ invertY: e.target.value === '1' }); });
+    bind('set-volume', 'input', function (e) { update({ volume: e.target.value }); });
+    bind('set-difficulty', 'change', function (e) { update({ difficulty: e.target.value }); });
+    bind('set-reduce-motion', 'change', function (e) { update({ reduceMotion: e.target.checked }); });
+    bind('set-contrast', 'change', function (e) { update({ highContrast: e.target.checked }); });
+    bind('set-large-hud', 'change', function (e) { update({ largeHud: e.target.checked }); });
+    bind('settings-reset', 'click', function () { update(DEFAULTS); });
+    // Keep menu clicks from bubbling to the overlay's "click anywhere to play" handler.
+    var panels = byId('front-panels'); if (panels) panels.addEventListener('click', function (e) { e.stopPropagation(); });
+    var tabs = document.querySelectorAll('.front-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].addEventListener('click', function (e) {
+        e.stopPropagation();
+        selectTab(e.currentTarget);
+      });
+      tabs[i].addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        var all = Array.prototype.slice.call(document.querySelectorAll('.front-tab'));
+        var idx = all.indexOf(e.currentTarget);
+        var next = all[(idx + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length];
+        selectTab(next); next.focus(); e.preventDefault();
+      });
+    }
+  }
+
+  function selectTab(tab) {
+    var tabs = document.querySelectorAll('.front-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var on = tabs[i] === tab;
+      tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
+      var panel = byId(tabs[i].getAttribute('data-panel'));
+      if (panel) panel.classList.toggle('active', on);
+    }
+  }
+
+  // Loading progress. main.js reports each subsystem as it is constructed, in module order; the
+  // bar is determinate and the step list ticks off what is done.
+  var STEPS = ['modules', 'textures', 'render', 'city', 'vehicles', 'peds', 'player', 'police', 'combat', 'missions', 'hud', 'ready'];
+  var LABELS = {
+    modules: 'Loading modules', textures: 'Painting textures', render: 'Lighting the bay', city: 'Generating Marisol Bay',
+    vehicles: 'Fuelling traffic', peds: 'Filling the sidewalks', player: 'Waking Rico', police: 'Dispatching Meridian PD',
+    combat: 'Loading the armoury', missions: 'Briefing Tessa', hud: 'Drawing the HUD', ready: 'Ready',
+  };
+  function progress(step) {
+    var idx = STEPS.indexOf(step);
+    if (idx < 0) return;
+    var pct = Math.round(((idx + 1) / STEPS.length) * 100);
+    var fill = byId('loading-fill'); if (fill) fill.style.width = pct + '%';
+    var pctEl = byId('loading-pct'); if (pctEl) pctEl.textContent = pct + '%';
+    var stepEl = byId('loading-step'); if (stepEl) stepEl.textContent = LABELS[step];
+    var root = byId('loading'); if (root) root.setAttribute('aria-valuenow', String(pct));
+    var items = document.querySelectorAll('#loading-modules li');
+    for (var i = 0; i < items.length; i++) {
+      var si = STEPS.indexOf(items[i].getAttribute('data-step'));
+      items[i].classList.toggle('done', si <= idx);
+      items[i].classList.toggle('active', si === idx + 1);
+    }
+  }
+
+  // Animated title backdrop: a banded synthwave sun sinking behind a layered skyline, with palms
+  // and a scrolling road grid. Building heights come from an integer hash, so the skyline is the
+  // same every visit; only the animation phase advances.
+  function hash(n) {
+    n = Math.imul(n ^ 0x27d4eb2d, 0x165667b1);
+    n = Math.imul(n ^ (n >>> 15), 0x2c1b3c6d);
+    return ((n ^ (n >>> 13)) >>> 0) / 4294967296;
+  }
+  function startBackdrop() {
+    var canvas = byId('title-backdrop');
+    var overlay = byId('overlay');
+    if (!canvas || shotMode) return;
+    var ctx = canvas.getContext('2d');
+    var t0 = performance.now();
+    function draw(now) {
+      requestAnimationFrame(draw);
+      if (overlay.classList.contains('hidden') || settings.reduceMotion) return;
+      var w = canvas.clientWidth | 0, h = canvas.clientHeight | 0;
+      if (w < 2 || h < 2) return;
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      var t = (now - t0) / 1000;
+      ctx.clearRect(0, 0, w, h);
+      var horizon = h * 0.62;
+      // Sun with horizontal cut bands that slide downward.
+      var sunR = Math.min(w, h) * 0.42;
+      var sx = w * 0.5, sy = horizon - sunR * 0.18;
+      var g = ctx.createLinearGradient(0, sy - sunR, 0, sy + sunR);
+      g.addColorStop(0, 'rgba(255,236,150,0.9)'); g.addColorStop(0.55, 'rgba(255,128,80,0.85)'); g.addColorStop(1, 'rgba(255,60,120,0.8)');
+      ctx.save();
+      ctx.beginPath(); ctx.arc(sx, sy, sunR, Math.PI, 0); ctx.closePath(); ctx.clip();
+      ctx.fillStyle = g; ctx.fillRect(sx - sunR, sy - sunR, sunR * 2, sunR);
+      ctx.globalCompositeOperation = 'destination-out';
+      for (var b = 0; b < 7; b++) {
+        var by = sy - sunR * 0.5 + ((b * 0.09 + t * 0.03) % 0.6) * sunR;
+        ctx.fillRect(sx - sunR, by, sunR * 2, 2 + b * 0.9);
+      }
+      ctx.restore();
+      // Two skyline layers; the near one has lit windows that blink on a slow hash cycle.
+      for (var layer = 0; layer < 2; layer++) {
+        var speed = 6 + layer * 10;
+        var scroll = (t * speed) % 64;
+        var colBase = Math.floor((t * speed) / 64) * 2;
+        ctx.fillStyle = layer === 0 ? 'rgba(60,30,80,0.85)' : 'rgba(22,12,36,0.95)';
+        for (var x = -64, i = 0; x < w + 64; x += 32, i++) {
+          var col = i + colBase;
+          var bh = (0.25 + hash(col * 7 + layer * 911) * (layer === 0 ? 0.75 : 0.5)) * horizon * 0.7;
+          var bw = 24 + hash(col * 13 + layer) * 18;
+          var bx = x - scroll;
+          ctx.fillRect(bx, horizon - bh, bw, bh);
+          if (layer === 1) {
+            ctx.fillStyle = 'rgba(255,200,120,0.55)';
+            for (var wy = horizon - bh + 6; wy < horizon - 6; wy += 9) {
+              for (var wx = 4; wx < bw - 4; wx += 7) {
+                if (hash(col * 131 + (wx | 0) * 31 + (wy | 0) * 17 + Math.floor(t * 0.5)) > 0.72) ctx.fillRect(bx + wx, wy, 3, 4);
+              }
+            }
+            ctx.fillStyle = 'rgba(22,12,36,0.95)';
+          }
+        }
+      }
+      // Ground and a perspective road grid scrolling towards the viewer.
+      ctx.fillStyle = 'rgba(14,8,26,0.92)'; ctx.fillRect(0, horizon, w, h - horizon);
+      ctx.strokeStyle = 'rgba(255,90,170,0.55)'; ctx.lineWidth = 1;
+      for (var k = 0; k < 14; k++) {
+        var p = (k + (t * 0.8) % 1) / 14;
+        var yy = horizon + (h - horizon) * p * p;
+        ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(w, yy); ctx.stroke();
+      }
+      for (var v = -12; v <= 12; v++) {
+        ctx.beginPath(); ctx.moveTo(w * 0.5 + v * 8, horizon); ctx.lineTo(w * 0.5 + v * w * 0.12, h); ctx.stroke();
+      }
+      // Swaying palms at both edges.
+      for (var side = 0; side < 2; side++) {
+        var px = side === 0 ? w * 0.08 : w * 0.92;
+        var top = h * 0.22;
+        var sway = Math.sin(t * 0.9 + side) * 10;
+        ctx.strokeStyle = 'rgba(10,6,18,0.95)'; ctx.lineWidth = 7;
+        ctx.beginPath(); ctx.moveTo(px, h); ctx.quadraticCurveTo(px + 6, h * 0.6, px + sway, top); ctx.stroke();
+        ctx.lineWidth = 4;
+        for (var f = 0; f < 7; f++) {
+          var a = (f / 7) * Math.PI * 2 + Math.sin(t + f) * 0.08;
+          ctx.beginPath(); ctx.moveTo(px + sway, top);
+          ctx.quadraticCurveTo(px + sway + Math.cos(a) * 34, top - 18 + Math.sin(a) * 8, px + sway + Math.cos(a) * 62, top + 16 + Math.abs(Math.sin(a)) * 12);
+          ctx.stroke();
+        }
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+
+  window.VMFront = {
+    getSettings: function () { return settings; },
+    update: update,
+    onChange: function (fn) { listeners.push(fn); },
+    progress: progress,
+    setPaused: function (paused) {
+      var hint = byId('pause-hint'); if (hint) hint.style.display = paused ? 'block' : 'none';
+    },
+  };
+
+  // This script sits after all the markup it touches, and deferred module scripts (main.js) run
+  // before DOMContentLoaded, so initialise immediately rather than waiting for that event.
+  syncForm();
+  wireForm();
+  applyBodyClasses();
+  progress('modules');
+  startBackdrop();
+})();
+</script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

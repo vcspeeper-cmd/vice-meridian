@@ -1,5 +1,178 @@
 import * as THREE from 'three';
-import { CITY, PALETTE } from './config.js';
+import { CITY, CITY_GEN, PALETTE } from './config.js';
+
+// --- District planner --------------------------------------------------------------------------
+// Every main-grid block belongs to one district. The rules are positional (no RNG), so the plan
+// is identical for every seed and other systems can ask "what district is this?" in O(1).
+export function planDistrict(col, row) {
+  if (col === CITY.gridCols - 1) return 'waterfront';
+  if (row === CITY.gridRows - 1 && col >= 2) return 'industrial';
+  if (col >= 1 && col <= 3 && row >= 1 && row <= 3) return 'downtown';
+  return 'residential';
+}
+
+// --- Uniform-grid spatial index ----------------------------------------------------------------
+// Axis-aligned boxes are bucketed into square cells. A query visits only the cells under the
+// probe circle, so a collision test touches a handful of boxes instead of all of them. Candidate
+// indices come back sorted ascending, which keeps "first hit wins" resolution identical to a
+// linear scan over the original array.
+export class ColliderGrid {
+  constructor(cellSize = 24) {
+    this.cellSize = cellSize;
+    this.cells = new Map();
+    this.items = [];
+    this._stamp = new Uint32Array(0);
+    this._query = 0;
+    this._out = [];
+  }
+
+  _key(cx, cz) {
+    // Pack two signed 16-bit cell coordinates into one integer key.
+    return ((cx + 32768) << 16) | (cz + 32768);
+  }
+
+  insert(index, box) {
+    this.items[index] = box;
+    const cs = this.cellSize;
+    const x0 = Math.floor(box.minX / cs);
+    const x1 = Math.floor(box.maxX / cs);
+    const z0 = Math.floor(box.minZ / cs);
+    const z1 = Math.floor(box.maxZ / cs);
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cz = z0; cz <= z1; cz++) {
+        const k = this._key(cx, cz);
+        let list = this.cells.get(k);
+        if (!list) {
+          list = [];
+          this.cells.set(k, list);
+        }
+        list.push(index);
+      }
+    }
+  }
+
+  build(boxes) {
+    this.cells.clear();
+    this.items = [];
+    for (let i = 0; i < boxes.length; i++) this.insert(i, boxes[i]);
+    this._stamp = new Uint32Array(boxes.length);
+  }
+
+  // Indices of every box whose cells overlap the circle (x, z, r). Reuses one output array, so
+  // callers must consume it before the next query.
+  query(x, z, r) {
+    const out = this._out;
+    out.length = 0;
+    if (this._stamp.length < this.items.length) this._stamp = new Uint32Array(this.items.length);
+    this._query = (this._query + 1) >>> 0 || 1;
+    const q = this._query;
+    const cs = this.cellSize;
+    const x0 = Math.floor((x - r) / cs);
+    const x1 = Math.floor((x + r) / cs);
+    const z0 = Math.floor((z - r) / cs);
+    const z1 = Math.floor((z + r) / cs);
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cz = z0; cz <= z1; cz++) {
+        const list = this.cells.get(this._key(cx, cz));
+        if (!list) continue;
+        for (let i = 0; i < list.length; i++) {
+          const idx = list[i];
+          if (this._stamp[idx] === q) continue;
+          this._stamp[idx] = q;
+          out.push(idx);
+        }
+      }
+    }
+    if (out.length > 1) out.sort((a, b) => a - b);
+    return out;
+  }
+
+  stats() {
+    let maxPerCell = 0;
+    let total = 0;
+    for (const list of this.cells.values()) {
+      maxPerCell = Math.max(maxPerCell, list.length);
+      total += list.length;
+    }
+    return { cells: this.cells.size, items: this.items.length, maxPerCell, avgPerCell: this.cells.size ? total / this.cells.size : 0 };
+  }
+}
+
+// --- Road graph ------------------------------------------------------------------------------
+// Nodes are every intersection of both grids plus the T-junctions where the annex's offset
+// east-west streets meet the western boulevard. Edges follow paved road segments and carry
+// their length as cost. Police A* (police.js) runs over this graph.
+export function buildRoadGraph(roadCentersX, roadCentersZ, annex) {
+  const nodes = [];
+  const adj = [];
+  const byKey = new Map();
+  const addNode = (x, z, kind, col, row) => {
+    const key = `${Math.round(x * 10)},${Math.round(z * 10)}`;
+    if (byKey.has(key)) return byKey.get(key);
+    const id = nodes.length;
+    nodes.push({ id, x, z, kind, col, row });
+    adj.push([]);
+    byKey.set(key, id);
+    return id;
+  };
+  const link = (a, b) => {
+    if (a === b || a === undefined || b === undefined) return;
+    if (adj[a].some((e) => e.to === b)) return;
+    const cost = Math.hypot(nodes[a].x - nodes[b].x, nodes[a].z - nodes[b].z);
+    adj[a].push({ to: b, cost });
+    adj[b].push({ to: a, cost });
+  };
+  const main = [];
+  for (let c = 0; c < roadCentersX.length; c++) {
+    main.push([]);
+    for (let r = 0; r < roadCentersZ.length; r++) main[c].push(addNode(roadCentersX[c], roadCentersZ[r], 'main', c, r));
+  }
+  for (let c = 0; c < roadCentersX.length; c++) {
+    for (let r = 0; r < roadCentersZ.length; r++) {
+      if (c + 1 < roadCentersX.length) link(main[c][r], main[c + 1][r]);
+      if (r + 1 < roadCentersZ.length) link(main[c][r], main[c][r + 1]);
+    }
+  }
+  if (annex) {
+    const an = [];
+    for (let c = 0; c < annex.roadX.length; c++) {
+      an.push([]);
+      for (let r = 0; r < annex.roadZ.length; r++) an[c].push(addNode(annex.roadX[c], annex.roadZ[r], 'annex', c, r));
+    }
+    for (let c = 0; c < annex.roadX.length; c++) {
+      for (let r = 0; r < annex.roadZ.length; r++) {
+        if (c + 1 < annex.roadX.length) link(an[c][r], an[c + 1][r]);
+        if (r + 1 < annex.roadZ.length) link(an[c][r], an[c][r + 1]);
+      }
+    }
+    // T-junctions on the western boulevard (main column 0).
+    const westX = roadCentersX[0];
+    for (let r = 0; r < annex.roadZ.length; r++) {
+      const z = annex.roadZ[r];
+      const j = addNode(westX, z, 'junction', 0, r + 0.5);
+      link(j, an[0][r]);
+      for (let mr = 0; mr < roadCentersZ.length - 1; mr++) {
+        if (z > roadCentersZ[mr] && z < roadCentersZ[mr + 1]) {
+          link(j, main[0][mr]);
+          link(j, main[0][mr + 1]);
+        }
+      }
+    }
+  }
+  const nearest = (x, z) => {
+    let best = 0;
+    let bestD = Infinity;
+    for (const n of nodes) {
+      const d = (n.x - x) ** 2 + (n.z - z) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = n.id;
+      }
+    }
+    return nodes[best];
+  };
+  return { nodes, adj, nearest, neighbours: (id) => adj[id] };
+}
 
 export function buildCity(scene, textures, rng) {
   const group = new THREE.Group();
@@ -240,6 +413,8 @@ export function buildCity(scene, textures, rng) {
   const benches = [];
   const canopyTrees = [];
   const parkFeatures = [];
+  const roofTops = [];
+  const busStops = [];
 
   let bIdx = 0;
   for (let c = 0; c < cols; c++) {
@@ -271,6 +446,8 @@ export function buildCity(scene, textures, rng) {
       const isDockBlock = r === rows - 1 && c >= 2;
       const isCoastalBlock = c === cols - 1;
       const isDowntown = c >= 1 && c <= 3 && r >= 1 && r <= 3;
+      const blockDistrict = planDistrict(c, r);
+      blockInfo.district = blockDistrict;
 
       // Palm trees along block edges facing boulevards
       const edgeOff = CITY.blockSize * 0.5 - 2.1;
@@ -299,6 +476,10 @@ export function buildCity(scene, textures, rng) {
       hydrants.push({ x: bx - kerb, z: bz + 9 + (c % 3) * 2 });
       bins.push({ x: bx + kerb, z: bz - 7 - (r % 3) * 2, rot: 0 });
       if ((c * 3 + r) % 2 === 0) benches.push({ x: bx + 6, z: bz + kerb, rot: 0 });
+      // Bus shelters on the south kerb of every third downtown/residential block.
+      if ((blockDistrict === 'downtown' || blockDistrict === 'residential') && (c + r * 2) % CITY_GEN.busStopEvery === 0 && !(c === CITY.parkBlock.col && r === CITY.parkBlock.row)) {
+        busStops.push({ x: bx - 12, z: bz + CITY.blockSize * 0.5 - 1.6, rot: 0 });
+      }
 
       // City park: lawn, crossing footpaths, a fountain and shade trees instead of buildings.
       if (c === CITY.parkBlock.col && r === CITY.parkBlock.row) {
@@ -450,6 +631,9 @@ export function buildCity(scene, textures, rng) {
               color: 0x3b4454,
             });
           }
+          // Remember the final roof footprint for the rooftop prop pass (no RNG draw here, so the
+          // main generation stream is untouched).
+          roofTops.push({ x: px, z: pz, top: roofTop, w: roofW, d: roofD, style: paletteEntry.style, district: blockDistrict, hasBox: h > 20 });
 
           // Storefront neon signs facing the main boulevards
           if ((isCoastalBlock || c === cols - 2) && sx === 1 && rng.chance(0.75)) {
@@ -523,6 +707,7 @@ export function buildCity(scene, textures, rng) {
           trimInstances.push({ x: px, y: h + 0.4, z: pz, sx: w + 0.4, sy: 0.55, sz: d + 0.4, color: pal.trim });
           colliders.push({ minX: px - w * 0.5, maxX: px + w * 0.5, minZ: pz - d * 0.5, maxZ: pz + d * 0.5, maxY: h });
           if (h > 11 && rng.chance(0.35)) waterTowers.push({ x: px, y: h + 0.22, z: pz });
+          roofTops.push({ x: px, z: pz, top: h, w, d, style: pal.style, district: 'residential', hasBox: false });
         }
       }
       palmPositions.push({ x: bx, z: bz - half + 2, lean: rng.range(-0.12, 0.12), h: rng.range(7, 10), rot: rng.range(0, Math.PI * 2) });
@@ -916,6 +1101,104 @@ export function buildCity(scene, textures, rng) {
   garagePad.position.set(CITY.garagePos.x, 0.28, CITY.garagePos.z);
   group.add(garagePad);
 
+  // --- Rooftop prop pass -----------------------------------------------------------------------
+  // AC units on most roofs, lattice antennas with red aviation lamps on the tallest downtown
+  // towers. A forked stream is used so these props never shift the main generation sequence.
+  const propRng = rng.fork(0x0f1a7);
+  const acUnits = [];
+  const antennas = [];
+  for (const rt of roofTops) {
+    if (rt.top < CITY_GEN.acMinHeight) continue;
+    const n = rt.w > 14 ? propRng.int(1, CITY_GEN.acMaxPerRoof) : propRng.int(0, 2);
+    for (let i = 0; i < n; i++) {
+      // Keep units in the outer ring of the roof so they never sink into the central HVAC box.
+      const side = propRng.chance(0.5) ? -1 : 1;
+      const alongX = propRng.chance(0.5);
+      const ox = alongX ? propRng.range(-rt.w * 0.38, rt.w * 0.38) : side * rt.w * 0.36;
+      const oz = alongX ? side * rt.d * 0.36 : propRng.range(-rt.d * 0.38, rt.d * 0.38);
+      acUnits.push({ x: rt.x + ox, y: rt.top + 0.22 + 0.55, z: rt.z + oz, rot: alongX ? 0 : Math.PI / 2, s: propRng.range(0.85, 1.25) });
+    }
+    if (rt.district === 'downtown' && rt.top > CITY_GEN.antennaMinHeight && propRng.chance(0.7)) {
+      antennas.push({ x: rt.x + propRng.range(-1.5, 1.5), y: rt.top + 0.22, z: rt.z + propRng.range(-1.5, 1.5), h: propRng.range(6, 13) });
+    }
+  }
+  if (acUnits.length > 0) {
+    const acMat = new THREE.MeshLambertMaterial({ color: 0x9aa3ad });
+    const acInst = new THREE.InstancedMesh(unitBox, acMat, acUnits.length);
+    acUnits.forEach((u, i) => {
+      dummy.position.set(u.x, u.y, u.z);
+      dummy.rotation.set(0, u.rot, 0);
+      dummy.scale.set(1.8 * u.s, 1.1 * u.s, 1.2 * u.s);
+      dummy.updateMatrix();
+      acInst.setMatrixAt(i, dummy.matrix);
+    });
+    group.add(acInst);
+  }
+  if (antennas.length > 0) {
+    const mastGeo = new THREE.CylinderGeometry(0.08, 0.2, 1, 5);
+    mastGeo.translate(0, 0.5, 0);
+    const mastInst = new THREE.InstancedMesh(mastGeo, new THREE.MeshLambertMaterial({ color: 0x5a5f6b }), antennas.length);
+    const tipInst = new THREE.InstancedMesh(new THREE.BoxGeometry(0.42, 0.42, 0.42), new THREE.MeshBasicMaterial({ color: 0xff3348 }), antennas.length);
+    antennas.forEach((a, i) => {
+      dummy.position.set(a.x, a.y, a.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, a.h, 1);
+      dummy.updateMatrix();
+      mastInst.setMatrixAt(i, dummy.matrix);
+      dummy.position.set(a.x, a.y + a.h + 0.2, a.z);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      tipInst.setMatrixAt(i, dummy.matrix);
+    });
+    group.add(mastInst, tipInst);
+  }
+
+  // Bus shelters: roof, rear glass, two posts and a route sign, all in one coloured instance set.
+  if (busStops.length > 0) {
+    const parts = [
+      { ox: 0, oy: 2.55, oz: 0, sx: 3.8, sy: 0.14, sz: 1.7, color: 0x30cfd0 },
+      { ox: 0, oy: 1.35, oz: -0.72, sx: 3.6, sy: 2.2, sz: 0.06, color: 0x9fd8e8 },
+      { ox: -1.75, oy: 1.3, oz: 0.7, sx: 0.12, sy: 2.5, sz: 0.12, color: 0x3b404e },
+      { ox: 1.75, oy: 1.3, oz: 0.7, sx: 0.12, sy: 2.5, sz: 0.12, color: 0x3b404e },
+      { ox: 2.3, oy: 2.0, oz: 0.75, sx: 0.08, sy: 0.7, sz: 0.55, color: 0xffb347 },
+      { ox: 0, oy: 0.55, oz: -0.45, sx: 2.6, sy: 0.1, sz: 0.45, color: 0x8c5f3e },
+    ];
+    const shelterInst = new THREE.InstancedMesh(unitBox, new THREE.MeshLambertMaterial({ color: 0xffffff }), busStops.length * parts.length);
+    let si = 0;
+    for (const bs of busStops) {
+      const cos = Math.cos(bs.rot);
+      const sin = Math.sin(bs.rot);
+      for (const p of parts) {
+        dummy.position.set(bs.x + p.ox * cos + p.oz * sin, 0.22 + p.oy, bs.z - p.ox * sin + p.oz * cos);
+        dummy.rotation.set(0, bs.rot, 0);
+        dummy.scale.set(p.sx, p.sy, p.sz);
+        dummy.updateMatrix();
+        shelterInst.setMatrixAt(si, dummy.matrix);
+        colorObj.setHex(p.color);
+        shelterInst.setColorAt(si, colorObj);
+        si++;
+      }
+      colliders.push({ minX: bs.x - 1.9, maxX: bs.x + 1.9, minZ: bs.z - 0.8, maxZ: bs.z - 0.62, maxY: 2.4 });
+    }
+    shelterInst.instanceColor.needsUpdate = true;
+    group.add(shelterInst);
+  }
+
+  // Spatial index over every static collider and the road graph for pathfinding.
+  const colliderGrid = new ColliderGrid(CITY_GEN.spatialCellSize);
+  colliderGrid.build(colliders);
+  const roadGraph = buildRoadGraph(roadCentersX, roadCentersZ, annex);
+
+  // O(1) district lookup from world position (main grid blocks, then the annex and the shore).
+  function districtAt(x, z) {
+    if (x > CITY.coastalRoadX + CITY.roadWidth * 0.5) return 'waterfront';
+    if (x < startX) return 'residential';
+    const c = Math.floor((x - startX) / pitch);
+    const r = Math.floor((z - startZ) / pitch);
+    if (c < 0 || c >= cols || r < 0 || r >= rows) return 'residential';
+    return planDistrict(c, r);
+  }
+
   // Signal helper: true = NS green, false = EW green
   const lightCycle = 14;
   function isNorthSouthGreen(time, col, row) {
@@ -939,8 +1222,10 @@ export function buildCity(scene, textures, rng) {
   }
 
   function resolveCircleCollisions(pos, radius) {
-    for (let i = 0; i < colliders.length; i++) {
-      const c = colliders[i];
+    // Only the boxes bucketed under this circle can touch it; indices arrive in array order.
+    const candidates = colliderGrid.query(pos.x, pos.z, radius + 0.01);
+    for (let k = 0; k < candidates.length; k++) {
+      const c = colliders[candidates[k]];
       const cx = Math.max(c.minX, Math.min(pos.x, c.maxX));
       const cz = Math.max(c.minZ, Math.min(pos.z, c.maxZ));
       const dx = pos.x - cx;
@@ -1011,6 +1296,46 @@ export function buildCity(scene, textures, rng) {
     return parks.some((p) => Math.abs(x - p.x) < p.half && Math.abs(z - p.z) < p.half);
   }
 
+  // True when the point is inside any static collider box below `height` (line-of-sight and
+  // spawn-validity checks for police and pedestrians).
+  function isBlocked(x, z, height = 1) {
+    const candidates = colliderGrid.query(x, z, 0.01);
+    for (let k = 0; k < candidates.length; k++) {
+      const c = colliders[candidates[k]];
+      if (x >= c.minX && x <= c.maxX && z >= c.minZ && z <= c.maxZ && height <= c.maxY) return true;
+    }
+    return false;
+  }
+
+  // Coarse line-of-sight on the XZ plane: march in steps no longer than half a cell and test the
+  // spatial index at each sample. Good enough for "can the officer see the player".
+  function hasLineOfSight(ax, az, bx, bz, eyeHeight = 1.6) {
+    const dx = bx - ax;
+    const dz = bz - az;
+    const len = Math.hypot(dx, dz);
+    const steps = Math.max(1, Math.ceil(len / 2));
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      if (isBlocked(ax + dx * t, az + dz * t, eyeHeight)) return false;
+    }
+    return true;
+  }
+
+  // Which road (if any) a point is on: 'ns', 'ew', 'intersection' or null.
+  function roadAt(x, z) {
+    const half = CITY.roadWidth * 0.5;
+    let onNS = false;
+    let onEW = false;
+    for (const rx of roadCentersX) if (Math.abs(x - rx) < half && z > startZ - half && z < -startZ + half) onNS = true;
+    for (const rz of roadCentersZ) if (Math.abs(z - rz) < half && x > startX - half && x < -startX + half) onEW = true;
+    if (!onNS && !onEW) {
+      for (const rx of annex.roadX) if (Math.abs(x - rx) < half && z > annex.minZ && z < annex.maxZ) onNS = true;
+      for (const rz of annex.roadZ) if (Math.abs(z - rz) < half && x > annex.minX && x < annex.maxX + half) onEW = true;
+    }
+    if (onNS && onEW) return 'intersection';
+    return onNS ? 'ns' : onEW ? 'ew' : null;
+  }
+
   return {
     group,
     roadCentersX,
@@ -1027,6 +1352,14 @@ export function buildCity(scene, textures, rng) {
     resolveCircleCollisions,
     nearestRoadNode,
     isInPark,
+    isBlocked,
+    hasLineOfSight,
+    roadAt,
+    districtAt,
+    colliderGrid,
+    roadGraph,
+    busStops,
+    roofProps: { acUnits: acUnits.length, antennas: antennas.length },
     update,
   };
 }

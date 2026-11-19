@@ -302,6 +302,162 @@ export function createRenderRig(canvas, textures) {
 
   window.addEventListener('resize', resize);
 
+  // --- Quality tier management & dynamic resolution scaling ----------------------------------------
+  // The frame-budget guard monitors frame time and switches quality tiers to maintain target FPS.
+  // If the smoothed frame time exceeds downshiftMs for windowFrames in a row, drop one tier.
+  // If it stays below upshiftMs for twice as long, climb back up.
+  let currentTier = 'medium';
+  let tierAdjustTimer = 0;
+  let frameTimeSmoothed = 16.7;
+  let pixelRatioOverride = 1.0;
+
+  function setQualityTier(tier) {
+    currentTier = tier;
+    const tierCfg = QUALITY_TIERS[tier];
+    if (!tierCfg) return;
+
+    renderer.setPixelRatio(tierCfg.pixelRatio * pixelRatioOverride);
+    sunLight.shadow.mapSize.set(tierCfg.shadowMapSize, tierCfg.shadowMapSize);
+    sunLight.castShadow = tierCfg.shadows;
+    scene.fog.far = tierCfg.drawDistance;
+
+    if (postEnabled && !tierCfg.post) postEnabled = false;
+  }
+
+  function updateQualityGate(frameMs) {
+    frameTimeSmoothed = frameTimeSmoothed * (1 - FRAME_BUDGET.smoothing) + frameMs * FRAME_BUDGET.smoothing;
+
+    if (frameTimeSmoothed > FRAME_BUDGET.downshiftMs) {
+      tierAdjustTimer += 1;
+      if (tierAdjustTimer >= FRAME_BUDGET.windowFrames) {
+        const idx = QUALITY_ORDER.indexOf(currentTier);
+        if (idx < QUALITY_ORDER.length - 1) {
+          setQualityTier(QUALITY_ORDER[idx + 1]);
+        }
+        tierAdjustTimer = 0;
+      }
+    } else if (frameTimeSmoothed < FRAME_BUDGET.upshiftMs) {
+      tierAdjustTimer += 1;
+      if (tierAdjustTimer >= FRAME_BUDGET.windowFrames * 2) {
+        const idx = QUALITY_ORDER.indexOf(currentTier);
+        if (idx > 0) {
+          setQualityTier(QUALITY_ORDER[idx - 1]);
+        }
+        tierAdjustTimer = 0;
+      }
+    } else {
+      tierAdjustTimer = 0;
+    }
+  }
+
+  // --- Frustum culling: skip rendering blocks outside the camera view -----
+  const frustum = new THREE.Frustum();
+  const projMatrix = new THREE.Matrix4();
+  const frustumCulled = new Set();
+
+  function updateFrustumCull() {
+    projMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    frustum.setFromProjectionMatrix(projMatrix);
+    frustumCulled.clear();
+
+    // Test each block mesh's bounding sphere
+    for (const block of scene.children) {
+      if (!block.geometry || !block.geometry.boundingSphere) continue;
+      if (!block.visible) continue;
+
+      const sphere = block.geometry.boundingSphere;
+      const worldPos = new THREE.Vector3();
+      block.getWorldPosition(worldPos);
+      const worldSphere = new THREE.Sphere(worldPos, sphere.radius);
+
+      if (!frustum.intersectsSphere(worldSphere)) {
+        block.visible = false;
+        frustumCulled.add(block);
+      } else if (frustumCulled.has(block)) {
+        block.visible = true;
+        frustumCulled.delete(block);
+      }
+    }
+  }
+
+  // --- Main render loop with fixed timestep & frame interpolation --------
+  // The game runs at FIXED_DT (1/60), but renders interpolated between ticks.
+  // This decouples simulation from frame rate and prevents stuttering.
+  let lastTime = performance.now();
+  let accumulator = 0;
+  let running = true;
+
+  rig.isRunning = () => running;
+  rig.stop = () => { running = false; };
+
+  function renderLoop(now) {
+    if (!running) return;
+
+    const dt = Math.min((now - lastTime) / 1000, 0.05); // Cap at 50ms to prevent spiral
+    lastTime = now;
+    accumulator += dt;
+
+    // Let the game controller know how many fixed ticks are queued
+    rig.ticksQueued = 0;
+    while (accumulator >= FIXED_DT) {
+      rig.ticksQueued += 1;
+      accumulator -= FIXED_DT;
+    }
+
+    // Interpolation factor: 0 at the last tick, 1 just before the next tick
+    rig.interpolation = accumulator / FIXED_DT;
+
+    // Call the game's main simulation, which processes ticks and renderable state
+    if (rig.onTick) rig.onTick(rig.ticksQueued, rig.interpolation);
+
+    // Update camera position and atmosphere based on player/vehicle position
+    if (rig.getCameraTarget) {
+      const target = rig.getCameraTarget();
+      updateAtmosphere(target.position, target.time ?? 0);
+    }
+
+    // Cull blocks outside the frustum
+    updateFrustumCull();
+
+    // Render the scene (scene pass + post passes if enabled)
+    const startMs = performance.now();
+    render();
+    const frameMs = performance.now() - startMs;
+
+    // Update the frame-budget guard
+    updateQualityGate(frameMs);
+
+    requestAnimationFrame(renderLoop);
+  }
+
+  // --- Cleanup and resource disposal ------
+  rig.dispose = function() {
+    running = false;
+    window.removeEventListener('resize', resize);
+
+    // Dispose all geometries and materials
+    scene.traverse((obj) => {
+      if (obj.geometry) obj.geometry.dispose();
+      if (obj.material) {
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach(m => m.dispose());
+        } else {
+          obj.material.dispose();
+        }
+      }
+    });
+
+    // Dispose render targets
+    if (sceneRT) sceneRT.dispose();
+    if (glowRT) glowRT.dispose();
+
+    // Dispose the renderer and its WebGL context
+    renderer.dispose();
+  };
+
+  // Start the loop
+  requestAnimationFrame(renderLoop);
+
   return Object.assign(rig, {
     renderer,
     scene,

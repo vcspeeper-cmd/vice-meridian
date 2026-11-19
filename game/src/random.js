@@ -3,6 +3,7 @@
 // that small/sequential seeds still produce well-mixed, independent streams.
 // Same seed → same sequence → same world, on every run and every browser.
 
+// Initial state mixer: splitmix32 produces well-distributed seed values from any input.
 function splitmix32(seed) {
   let s = seed >>> 0;
   return () => {
@@ -10,10 +11,11 @@ function splitmix32(seed) {
     let z = s;
     z = Math.imul(z ^ (z >>> 16), 0x85ebca6b);
     z = Math.imul(z ^ (z >>> 13), 0xc2b2ae35);
-    return (z ^ (z >>> 16)) >>> 0;
+    return (z ^ (z >>> 15)) >>> 0;
   };
 }
 
+// Left rotate for xoshiro state mixing.
 function rotl(x, k) {
   return (x << k) | (x >>> (32 - k));
 }
@@ -31,7 +33,7 @@ export class SeededRandom {
     this.seed = (Number(seed) >>> 0) || 1;
   }
 
-  // Next raw 32-bit unsigned integer.
+  // Next raw 32-bit unsigned integer via xoshiro128** permutation.
   nextUint32() {
     const s = this.s;
     const result = Math.imul(rotl(Math.imul(s[1], 5), 7), 9) >>> 0;
@@ -50,6 +52,7 @@ export class SeededRandom {
     return this.nextUint32() / 4294967296;
   }
 
+  // Uniform float in [min, max).
   range(min, max) {
     return min + (max - min) * this.next();
   }
@@ -59,10 +62,12 @@ export class SeededRandom {
     return Math.floor(this.range(min, max + 1));
   }
 
+  // Random element from an array.
   pick(arr) {
     return arr[Math.floor(this.next() * arr.length)];
   }
 
+  // Bernoulli trial: true with probability p.
   chance(p) {
     return this.next() < p;
   }
@@ -72,13 +77,13 @@ export class SeededRandom {
     return (this.next() * 2 - 1) * mag;
   }
 
-  // Approximately normal (Irwin–Hall, 4 samples), mean 0, std ≈ sd.
+  // Approximately normal distribution (Irwin–Hall, 4 samples), mean 0, std ≈ sd.
   gaussian(sd = 1) {
     const sum = this.next() + this.next() + this.next() + this.next();
     return (sum - 2) * sd * 1.7320508;
   }
 
-  // Pick from [{ weight, ... }] (or [[value, weight]] pairs) proportionally to weight.
+  // Pick from weighted array. Items can be { weight, ... } objects or [value, weight] pairs.
   weighted(items) {
     let total = 0;
     for (const it of items) total += Array.isArray(it) ? it[1] : it.weight;
@@ -110,17 +115,19 @@ export class SeededRandom {
     return new SeededRandom(mixed || 1337);
   }
 
-  // Snapshot / restore the full generator state (e.g. for replays).
+  // Snapshot the full generator state for replay.
   getState() {
     return Array.from(this.s);
   }
 
+  // Restore the generator from a saved state.
   setState(state) {
     for (let i = 0; i < 4; i++) this.s[i] = state[i] >>> 0;
   }
 }
 
-// Seeded helpers usable with any SeededRandom instance.
+// Stateless helper functions usable with any SeededRandom instance.
+
 export function range(rng, min, max) {
   return rng.range(min, max);
 }
@@ -140,6 +147,8 @@ export function hash2(x, y, seed = 0) {
   h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
   return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
 }
+
+// Math utilities used throughout the codebase.
 
 export function clamp(v, min, max) {
   return v < min ? min : v > max ? max : v;

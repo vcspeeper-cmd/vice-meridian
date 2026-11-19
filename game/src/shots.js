@@ -5,7 +5,8 @@ import { MISSION_DEFS } from './missions.js';
 export function setupShotScene(shotName, ctx) {
   const { city, vehicles, peds, player, police, combat, missions, renderRig } = ctx;
 
-  // Reset dynamic entities cleanly before building the deterministic shot
+  // Reset dynamic entities cleanly before building the deterministic shot.
+  // Each shot starts from a clean slate so the frame is reproducible.
   police.resetWanted();
   missions.clearEnemies();
   player.health = 100;
