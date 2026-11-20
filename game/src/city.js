@@ -40,11 +40,11 @@ export class ColliderGrid {
     const z1 = Math.floor(box.maxZ / cs);
     for (let cx = x0; cx <= x1; cx++) {
       for (let cz = z0; cz <= z1; cz++) {
-        const k = this._key(cx, cz);
-        let list = this.cells.get(k);
+        const key = this._key(cx, cz);
+        let list = this.cells.get(key);
         if (!list) {
           list = [];
-          this.cells.set(k, list);
+          this.cells.set(key, list);
         }
         list.push(index);
       }
@@ -55,11 +55,9 @@ export class ColliderGrid {
     this.cells.clear();
     this.items = [];
     for (let i = 0; i < boxes.length; i++) this.insert(i, boxes[i]);
+    // One stamp slot per box; queries bump a counter instead of clearing the array.
     this._stamp = new Uint32Array(boxes.length);
-    // Guard against negative or zero box counts in builds to maintain grid validity.
-    if (boxes.length === 0) {
-      this._query = 0;
-    }
+    this._query = 0;
   }
 
   // Indices of every box whose cells overlap the circle (x, z, r). Reuses one output array, so
@@ -69,7 +67,7 @@ export class ColliderGrid {
     out.length = 0;
     if (this._stamp.length < this.items.length) this._stamp = new Uint32Array(this.items.length);
     this._query = (this._query + 1) >>> 0 || 1;
-    const q = this._query;
+    const stamp = this._query;
     const cs = this.cellSize;
     const x0 = Math.floor((x - r) / cs);
     const x1 = Math.floor((x + r) / cs);
@@ -81,8 +79,8 @@ export class ColliderGrid {
         if (!list) continue;
         for (let i = 0; i < list.length; i++) {
           const idx = list[i];
-          if (this._stamp[idx] === q) continue;
-          this._stamp[idx] = q;
+          if (this._stamp[idx] === stamp) continue;
+          this._stamp[idx] = stamp;
           out.push(idx);
         }
       }
@@ -95,10 +93,15 @@ export class ColliderGrid {
     let maxPerCell = 0;
     let total = 0;
     for (const list of this.cells.values()) {
-      maxPerCell = Math.max(maxPerCell, list.length);
+      if (list.length > maxPerCell) maxPerCell = list.length;
       total += list.length;
     }
-    return { cells: this.cells.size, items: this.items.length, maxPerCell, avgPerCell: this.cells.size ? total / this.cells.size : 0 };
+    return {
+      cells: this.cells.size,
+      items: this.items.length,
+      maxPerCell,
+      avgPerCell: this.cells.size ? total / this.cells.size : 0,
+    };
   }
 }
 
@@ -110,26 +113,33 @@ export function buildRoadGraph(roadCentersX, roadCentersZ, annex) {
   const nodes = [];
   const adj = [];
   const byKey = new Map();
+
   const addNode = (x, z, kind, col, row) => {
     const key = `${Math.round(x * 10)},${Math.round(z * 10)}`;
-    if (byKey.has(key)) return byKey.get(key);
+    const existing = byKey.get(key);
+    if (existing !== undefined) return existing;
     const id = nodes.length;
     nodes.push({ id, x, z, kind, col, row });
     adj.push([]);
     byKey.set(key, id);
     return id;
   };
+
   const link = (a, b) => {
     if (a === b || a === undefined || b === undefined) return;
-    if (adj[a].some((e) => e.to === b)) return;
+    if (adj[a].some((edge) => edge.to === b)) return;
     const cost = Math.hypot(nodes[a].x - nodes[b].x, nodes[a].z - nodes[b].z);
     adj[a].push({ to: b, cost });
     adj[b].push({ to: a, cost });
   };
+
   const main = [];
   for (let c = 0; c < roadCentersX.length; c++) {
-    main.push([]);
-    for (let r = 0; r < roadCentersZ.length; r++) main[c].push(addNode(roadCentersX[c], roadCentersZ[r], 'main', c, r));
+    const column = [];
+    main.push(column);
+    for (let r = 0; r < roadCentersZ.length; r++) {
+      column.push(addNode(roadCentersX[c], roadCentersZ[r], 'main', c, r));
+    }
   }
   for (let c = 0; c < roadCentersX.length; c++) {
     for (let r = 0; r < roadCentersZ.length; r++) {
@@ -137,11 +147,15 @@ export function buildRoadGraph(roadCentersX, roadCentersZ, annex) {
       if (r + 1 < roadCentersZ.length) link(main[c][r], main[c][r + 1]);
     }
   }
+
   if (annex) {
     const an = [];
     for (let c = 0; c < annex.roadX.length; c++) {
-      an.push([]);
-      for (let r = 0; r < annex.roadZ.length; r++) an[c].push(addNode(annex.roadX[c], annex.roadZ[r], 'annex', c, r));
+      const column = [];
+      an.push(column);
+      for (let r = 0; r < annex.roadZ.length; r++) {
+        column.push(addNode(annex.roadX[c], annex.roadZ[r], 'annex', c, r));
+      }
     }
     for (let c = 0; c < annex.roadX.length; c++) {
       for (let r = 0; r < annex.roadZ.length; r++) {
@@ -149,32 +163,35 @@ export function buildRoadGraph(roadCentersX, roadCentersZ, annex) {
         if (r + 1 < annex.roadZ.length) link(an[c][r], an[c][r + 1]);
       }
     }
-    // T-junctions on the western boulevard (main column 0).
+    // T-junctions on the western boulevard (main column 0). Each annex street meets the
+    // boulevard between two main-grid rows, so it links to both neighbouring intersections.
     const westX = roadCentersX[0];
     for (let r = 0; r < annex.roadZ.length; r++) {
       const z = annex.roadZ[r];
-      const j = addNode(westX, z, 'junction', 0, r + 0.5);
-      link(j, an[0][r]);
+      const junction = addNode(westX, z, 'junction', 0, r + 0.5);
+      link(junction, an[0][r]);
       for (let mr = 0; mr < roadCentersZ.length - 1; mr++) {
         if (z > roadCentersZ[mr] && z < roadCentersZ[mr + 1]) {
-          link(j, main[0][mr]);
-          link(j, main[0][mr + 1]);
+          link(junction, main[0][mr]);
+          link(junction, main[0][mr + 1]);
         }
       }
     }
   }
+
   const nearest = (x, z) => {
     let best = 0;
-    let bestD = Infinity;
-    for (const n of nodes) {
-      const d = (n.x - x) ** 2 + (n.z - z) ** 2;
-      if (d < bestD) {
-        bestD = d;
-        best = n.id;
+    let bestDist = Infinity;
+    for (const node of nodes) {
+      const d = (node.x - x) ** 2 + (node.z - z) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        best = node.id;
       }
     }
     return nodes[best];
   };
+
   return { nodes, adj, nearest, neighbours: (id) => adj[id] };
 }
 
@@ -221,7 +238,12 @@ export function buildCity(scene, textures, rng) {
     sidewalkRects: [],
   };
   const parks = [];
-  const pier = { z: CITY.pierZ, x0: CITY.beachStartX + 6, x1: CITY.waterStartX + CITY.pierLength, halfW: 3.4 };
+  const pier = {
+    z: CITY.pierZ,
+    x0: CITY.beachStartX + 6,
+    x1: CITY.waterStartX + CITY.pierLength,
+    halfW: 3.4,
+  };
 
   // Base ground slab under the urban area. It stops at the shoreline so it never covers the sea.
   const groundMat = new THREE.MeshLambertMaterial({ color: 0x2a2932 });
@@ -233,7 +255,10 @@ export function buildCity(scene, textures, rng) {
   group.add(groundMesh);
 
   // Beach sand strip on the east side, from the boardwalk down to the waterline
-  const sandMat = new THREE.MeshLambertMaterial({ map: textures.sand || null, color: textures.sand ? 0xffffff : PALETTE.sand });
+  const sandMat = new THREE.MeshLambertMaterial({
+    map: textures.sand || null,
+    color: textures.sand ? 0xffffff : PALETTE.sand,
+  });
   const sandWest = CITY.coastalRoadX + CITY.roadWidth * 0.5;
   const sandEast = CITY.waterStartX + 2.5;
   const sandMesh = new THREE.Mesh(new THREE.PlaneGeometry(sandEast - sandWest, 1400), sandMat);
@@ -319,6 +344,8 @@ export function buildCity(scene, textures, rng) {
 
   const dummy = new THREE.Object3D();
   let idx = 0;
+
+  // North-south segments: one per main-grid column and row, plus the annex columns.
   for (let c = 0; c < roadCentersX.length; c++) {
     for (let r = 0; r < rows; r++) {
       dummy.position.set(roadCentersX[c], 0.02, roadCentersZ[r] + pitch * 0.5);
@@ -337,6 +364,8 @@ export function buildCity(scene, textures, rng) {
       nsMesh.setMatrixAt(idx++, dummy.matrix);
     }
   }
+
+  // East-west segments: one per main-grid row and column, plus the annex rows.
   idx = 0;
   for (let r = 0; r < roadCentersZ.length; r++) {
     for (let c = 0; c < cols; c++) {
@@ -356,6 +385,8 @@ export function buildCity(scene, textures, rng) {
       ewMesh.setMatrixAt(idx++, dummy.matrix);
     }
   }
+
+  // Intersection pads for both grids; main pads alternate signal phase in a checkerboard.
   idx = 0;
   for (let c = 0; c < roadCentersX.length; c++) {
     for (let r = 0; r < roadCentersZ.length; r++) {
@@ -457,10 +488,22 @@ export function buildCity(scene, textures, rng) {
       const edgeOff = CITY.blockSize * 0.5 - 2.1;
       for (const offset of [-16, 0, 16]) {
         if (isCoastalBlock || r <= 3 || rng.chance(0.55)) {
-          palmPositions.push({ x: bx + edgeOff, z: bz + offset, lean: rng.range(-0.14, 0.14), h: rng.range(7.2, 11.2), rot: rng.range(0, Math.PI * 2) });
+          palmPositions.push({
+            x: bx + edgeOff,
+            z: bz + offset,
+            lean: rng.range(-0.14, 0.14),
+            h: rng.range(7.2, 11.2),
+            rot: rng.range(0, Math.PI * 2),
+          });
         }
         if (c === cols - 2 || rng.chance(0.45)) {
-          palmPositions.push({ x: bx - edgeOff, z: bz + offset, lean: rng.range(-0.14, 0.14), h: rng.range(7.0, 10.6), rot: rng.range(0, Math.PI * 2) });
+          palmPositions.push({
+            x: bx - edgeOff,
+            z: bz + offset,
+            lean: rng.range(-0.14, 0.14),
+            h: rng.range(7.0, 10.6),
+            rot: rng.range(0, Math.PI * 2),
+          });
         }
       }
 
@@ -481,21 +524,33 @@ export function buildCity(scene, textures, rng) {
       bins.push({ x: bx + kerb, z: bz - 7 - (r % 3) * 2, rot: 0 });
       if ((c * 3 + r) % 2 === 0) benches.push({ x: bx + 6, z: bz + kerb, rot: 0 });
       // Bus shelters on the south kerb of every third downtown/residential block.
-      if ((blockDistrict === 'downtown' || blockDistrict === 'residential') && (c + r * 2) % CITY_GEN.busStopEvery === 0 && !(c === CITY.parkBlock.col && r === CITY.parkBlock.row)) {
+      const wantsBusStop = blockDistrict === 'downtown' || blockDistrict === 'residential';
+      const isParkBlock = c === CITY.parkBlock.col && r === CITY.parkBlock.row;
+      if (wantsBusStop && (c + r * 2) % CITY_GEN.busStopEvery === 0 && !isParkBlock) {
         busStops.push({ x: bx - 12, z: bz + CITY.blockSize * 0.5 - 1.6, rot: 0 });
       }
 
       // City park: lawn, crossing footpaths, a fountain and shade trees instead of buildings.
-      if (c === CITY.parkBlock.col && r === CITY.parkBlock.row) {
+      if (isParkBlock) {
         parks.push({ x: bx, z: bz, half: CITY.blockSize * 0.5 - 3 });
         parkFeatures.push({ x: bx, z: bz });
         colliders.push({ minX: bx - 3.4, maxX: bx + 3.4, minZ: bz - 3.4, maxZ: bz + 3.4, maxY: 1.2 });
         for (let i = 0; i < 10; i++) {
-          const a = (i / 10) * Math.PI * 2 + 0.3;
-          const rad = 13 + (i % 3) * 3.5;
-          canopyTrees.push({ x: bx + Math.cos(a) * rad, z: bz + Math.sin(a) * rad, s: rng.range(0.85, 1.3) });
+          const angle = (i / 10) * Math.PI * 2 + 0.3;
+          const radius = 13 + (i % 3) * 3.5;
+          canopyTrees.push({
+            x: bx + Math.cos(angle) * radius,
+            z: bz + Math.sin(angle) * radius,
+            s: rng.range(0.85, 1.3),
+          });
         }
-        for (const [ox, oz, rot] of [[-8, 4.2, 0], [8, -4.2, Math.PI], [4.2, 8, Math.PI / 2], [-4.2, -8, -Math.PI / 2]]) {
+        const parkBenches = [
+          [-8, 4.2, 0],
+          [8, -4.2, Math.PI],
+          [4.2, 8, Math.PI / 2],
+          [-4.2, -8, -Math.PI / 2],
+        ];
+        for (const [ox, oz, rot] of parkBenches) {
           benches.push({ x: bx + ox, z: bz + oz, rot });
         }
         continue;
@@ -503,13 +558,28 @@ export function buildCity(scene, textures, rng) {
 
       // Dockside freight yard (open arena for mission shootout with containers + warehouse)
       if (isDockBlock && c === 4) {
-        // Leave central yard open for the Pier 4 shootout, place warehouse at north edge and shipping containers as cover
+        // Leave central yard open for the Pier 4 shootout: warehouse at the north edge and
+        // shipping containers scattered as cover.
         const whW = 36;
         const whD = 12;
         const whH = 11;
         const whZ = bz - 15;
-        styleBuckets.warehouse.push({ x: bx, y: whH * 0.5 + 0.22, z: whZ, sx: whW, sy: whH, sz: whD, color: 0x77808a });
-        colliders.push({ minX: bx - whW * 0.5, maxX: bx + whW * 0.5, minZ: whZ - whD * 0.5, maxZ: whZ + whD * 0.5, maxY: whH });
+        styleBuckets.warehouse.push({
+          x: bx,
+          y: whH * 0.5 + 0.22,
+          z: whZ,
+          sx: whW,
+          sy: whH,
+          sz: whD,
+          color: 0x77808a,
+        });
+        colliders.push({
+          minX: bx - whW * 0.5,
+          maxX: bx + whW * 0.5,
+          minZ: whZ - whD * 0.5,
+          maxZ: whZ + whD * 0.5,
+          maxY: whH,
+        });
         signSpecs.push({ x: bx, y: 7.5, z: whZ + whD * 0.5 + 0.25, rotY: 0, w: 12, h: 3.4, signIndex: 5 });
 
         const crates = [
@@ -519,14 +589,14 @@ export function buildCity(scene, textures, rng) {
           { x: bx + 14, z: bz - 2, w: 2.8, h: 2.8, d: 7.5, color: 0x356978 },
           { x: bx - 15, z: bz + 13, w: 2.8, h: 2.8, d: 7.2, color: 0xa83c34 },
         ];
-        for (const cr of crates) {
-          dockCovers.push(cr);
+        for (const crate of crates) {
+          dockCovers.push(crate);
           colliders.push({
-            minX: cr.x - cr.w * 0.5,
-            maxX: cr.x + cr.w * 0.5,
-            minZ: cr.z - cr.d * 0.5,
-            maxZ: cr.z + cr.d * 0.5,
-            maxY: cr.h,
+            minX: crate.x - crate.w * 0.5,
+            maxX: crate.x + crate.w * 0.5,
+            minZ: crate.z - crate.d * 0.5,
+            maxZ: crate.z + crate.d * 0.5,
+            maxY: crate.h,
           });
         }
         continue;
@@ -537,9 +607,25 @@ export function buildCity(scene, textures, rng) {
         const gW = 24;
         const gD = 16;
         const gH = 7.5;
-        styleBuckets.warehouse.push({ x: bx - 7, y: gH * 0.5 + 0.22, z: bz - 10, sx: gW, sy: gH, sz: gD, color: 0x626b78 });
-        colliders.push({ minX: bx - 7 - gW * 0.5, maxX: bx - 7 + gW * 0.5, minZ: bz - 10 - gD * 0.5, maxZ: bz - 10 + gD * 0.5, maxY: gH });
-        signSpecs.push({ x: bx - 7, y: 6.2, z: bz - 10 + gD * 0.5 + 0.25, rotY: 0, w: 10.5, h: 3.0, signIndex: 2 });
+        const gx = bx - 7;
+        const gz = bz - 10;
+        styleBuckets.warehouse.push({
+          x: gx,
+          y: gH * 0.5 + 0.22,
+          z: gz,
+          sx: gW,
+          sy: gH,
+          sz: gD,
+          color: 0x626b78,
+        });
+        colliders.push({
+          minX: gx - gW * 0.5,
+          maxX: gx + gW * 0.5,
+          minZ: gz - gD * 0.5,
+          maxZ: gz + gD * 0.5,
+          maxY: gH,
+        });
+        signSpecs.push({ x: gx, y: 6.2, z: gz + gD * 0.5 + 0.25, rotY: 0, w: 10.5, h: 3.0, signIndex: 2 });
         continue;
       }
 
@@ -548,9 +634,32 @@ export function buildCity(scene, textures, rng) {
         const hW = 26;
         const hD = 22;
         const hH = 22;
-        styleBuckets.deco.push({ x: bx, y: hH * 0.5 + 0.22, z: bz - 4, sx: hW, sy: hH, sz: hD, color: 0xf4eee6 });
-        trimInstances.push({ x: bx, y: hH + 0.45, z: bz - 4, sx: hW + 0.8, sy: 0.7, sz: hD + 0.8, color: 0xff4558 });
-        colliders.push({ minX: bx - hW * 0.5, maxX: bx + hW * 0.5, minZ: bz - 4 - hD * 0.5, maxZ: bz - 4 + hD * 0.5, maxY: hH });
+        const hz = bz - 4;
+        styleBuckets.deco.push({
+          x: bx,
+          y: hH * 0.5 + 0.22,
+          z: hz,
+          sx: hW,
+          sy: hH,
+          sz: hD,
+          color: 0xf4eee6,
+        });
+        trimInstances.push({
+          x: bx,
+          y: hH + 0.45,
+          z: hz,
+          sx: hW + 0.8,
+          sy: 0.7,
+          sz: hD + 0.8,
+          color: 0xff4558,
+        });
+        colliders.push({
+          minX: bx - hW * 0.5,
+          maxX: bx + hW * 0.5,
+          minZ: hz - hD * 0.5,
+          maxZ: hz + hD * 0.5,
+          maxY: hH,
+        });
         continue;
       }
 
@@ -570,10 +679,19 @@ export function buildCity(scene, textures, rng) {
             paletteEntry = PALETTE.buildingPalettes[6];
             h = rng.range(8, 15);
           } else if (isCoastalBlock) {
-            paletteEntry = rng.pick([PALETTE.buildingPalettes[0], PALETTE.buildingPalettes[1], PALETTE.buildingPalettes[7], PALETTE.buildingPalettes[2]]);
+            paletteEntry = rng.pick([
+              PALETTE.buildingPalettes[0],
+              PALETTE.buildingPalettes[1],
+              PALETTE.buildingPalettes[7],
+              PALETTE.buildingPalettes[2],
+            ]);
             h = rng.range(15, 34);
           } else if (isDowntown) {
-            paletteEntry = rng.pick([PALETTE.buildingPalettes[2], PALETTE.buildingPalettes[3], PALETTE.buildingPalettes[0]]);
+            paletteEntry = rng.pick([
+              PALETTE.buildingPalettes[2],
+              PALETTE.buildingPalettes[3],
+              PALETTE.buildingPalettes[0],
+            ]);
             h = rng.range(28, 62);
           } else {
             paletteEntry = rng.pick(PALETTE.buildingPalettes);
@@ -611,15 +729,38 @@ export function buildCity(scene, textures, rng) {
               const tw = roofW * rng.range(0.62, 0.78);
               const td = roofD * rng.range(0.62, 0.78);
               const th = h * rng.range(0.18, 0.3);
-              styleBuckets[paletteEntry.style === 'glass' ? 'curtain' : paletteEntry.style].push({ x: px, y: roofTop + th * 0.5 + 0.22, z: pz, sx: tw, sy: th, sz: td, color: paletteEntry.style === 'glass' ? 0xffffff : paletteEntry.wall });
+              const tierStyle = paletteEntry.style === 'glass' ? 'curtain' : paletteEntry.style;
+              styleBuckets[tierStyle].push({
+                x: px,
+                y: roofTop + th * 0.5 + 0.22,
+                z: pz,
+                sx: tw,
+                sy: th,
+                sz: td,
+                color: paletteEntry.style === 'glass' ? 0xffffff : paletteEntry.wall,
+              });
               roofTop += th;
               roofW = tw;
               roofD = td;
-              trimInstances.push({ x: px, y: roofTop + 0.4, z: pz, sx: tw + 0.4, sy: 0.55, sz: td + 0.4, color: paletteEntry.trim });
+              trimInstances.push({
+                x: px,
+                y: roofTop + 0.4,
+                z: pz,
+                sx: tw + 0.4,
+                sy: 0.55,
+                sz: td + 0.4,
+                color: paletteEntry.trim,
+              });
             }
           } else if (h > 10 && h < 26 && paletteEntry.style !== 'glass' && rng.chance(0.3)) {
             waterTowers.push({ x: px + rng.range(-3, 3), y: h + 0.22, z: pz + rng.range(-3, 3) });
-          } else if (h > 10 && h < 30 && billboards.length < CITY.maxBillboards && (isCoastalBlock || c === cols - 2) && rng.chance(0.45)) {
+          } else if (
+            h > 10 &&
+            h < 30 &&
+            billboards.length < CITY.maxBillboards &&
+            (isCoastalBlock || c === cols - 2) &&
+            rng.chance(0.45)
+          ) {
             billboards.push({ x: px, y: h + 0.22, z: pz, rotY: Math.PI / 2, signIndex: rng.int(0, 4) });
           }
 
@@ -637,7 +778,16 @@ export function buildCity(scene, textures, rng) {
           }
           // Remember the final roof footprint for the rooftop prop pass (no RNG draw here, so the
           // main generation stream is untouched).
-          roofTops.push({ x: px, z: pz, top: roofTop, w: roofW, d: roofD, style: paletteEntry.style, district: blockDistrict, hasBox: h > 20 });
+          roofTops.push({
+            x: px,
+            z: pz,
+            top: roofTop,
+            w: roofW,
+            d: roofD,
+            style: paletteEntry.style,
+            district: blockDistrict,
+            hasBox: h > 20,
+          });
 
           // Storefront neon signs facing the main boulevards
           if ((isCoastalBlock || c === cols - 2) && sx === 1 && rng.chance(0.75)) {
@@ -673,6 +823,7 @@ export function buildCity(scene, textures, rng) {
       }
     }
   }
+
   // West Annex blocks: low-rise stucco/motel/deco neighbourhood with a single plot row per side.
   const annexPalettes = [
     PALETTE.buildingPalettes[4],
@@ -714,8 +865,20 @@ export function buildCity(scene, textures, rng) {
           roofTops.push({ x: px, z: pz, top: h, w, d, style: pal.style, district: 'residential', hasBox: false });
         }
       }
-      palmPositions.push({ x: bx, z: bz - half + 2, lean: rng.range(-0.12, 0.12), h: rng.range(7, 10), rot: rng.range(0, Math.PI * 2) });
-      palmPositions.push({ x: bx, z: bz + half - 2, lean: rng.range(-0.12, 0.12), h: rng.range(7, 10), rot: rng.range(0, Math.PI * 2) });
+      palmPositions.push({
+        x: bx,
+        z: bz - half + 2,
+        lean: rng.range(-0.12, 0.12),
+        h: rng.range(7, 10),
+        rot: rng.range(0, Math.PI * 2),
+      });
+      palmPositions.push({
+        x: bx,
+        z: bz + half - 2,
+        lean: rng.range(-0.12, 0.12),
+        h: rng.range(7, 10),
+        rot: rng.range(0, Math.PI * 2),
+      });
     }
   }
   group.add(swMesh);
@@ -798,13 +961,13 @@ export function buildCity(scene, textures, rng) {
     crateInst.castShadow = true;
     crateInst.receiveShadow = true;
     for (let i = 0; i < dockCovers.length; i++) {
-      const cr = dockCovers[i];
-      dummy.position.set(cr.x, cr.h * 0.5 + 0.22, cr.z);
+      const crate = dockCovers[i];
+      dummy.position.set(crate.x, crate.h * 0.5 + 0.22, crate.z);
       dummy.rotation.set(0, 0, 0);
-      dummy.scale.set(cr.w, cr.h, cr.d);
+      dummy.scale.set(crate.w, crate.h, crate.d);
       dummy.updateMatrix();
       crateInst.setMatrixAt(i, dummy.matrix);
-      colorObj.setHex(cr.color);
+      colorObj.setHex(crate.color);
       crateInst.setColorAt(i, colorObj);
     }
     crateInst.instanceColor.needsUpdate = true;
@@ -812,11 +975,11 @@ export function buildCity(scene, textures, rng) {
   }
 
   // Storefront neon signs
-  for (const s of signSpecs) {
-    const mat = new THREE.MeshBasicMaterial({ map: textures.signs[s.signIndex] });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(s.w, s.h), mat);
-    mesh.position.set(s.x, s.y, s.z);
-    mesh.rotation.y = s.rotY;
+  for (const spec of signSpecs) {
+    const mat = new THREE.MeshBasicMaterial({ map: textures.signs[spec.signIndex] });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(spec.w, spec.h), mat);
+    mesh.position.set(spec.x, spec.y, spec.z);
+    mesh.rotation.y = spec.rotY;
     group.add(mesh);
   }
 
@@ -943,7 +1106,8 @@ export function buildCity(scene, textures, rng) {
 
   // Rooftop billboards facing the coastal boulevard: steel frame + lit sign panel.
   if (billboards.length > 0) {
-    const frameInst = new THREE.InstancedMesh(unitBox, new THREE.MeshLambertMaterial({ color: 0x23262e }), billboards.length * 2);
+    const frameMat = new THREE.MeshLambertMaterial({ color: 0x23262e });
+    const frameInst = new THREE.InstancedMesh(unitBox, frameMat, billboards.length * 2);
     billboards.forEach((bb, i) => {
       dummy.rotation.set(0, bb.rotY, 0);
       dummy.position.set(bb.x, bb.y + 2.2, bb.z);
@@ -954,7 +1118,8 @@ export function buildCity(scene, textures, rng) {
       dummy.scale.set(12.6, 4.6, 0.35);
       dummy.updateMatrix();
       frameInst.setMatrixAt(i * 2 + 1, dummy.matrix);
-      const panel = new THREE.Mesh(new THREE.PlaneGeometry(12, 4), new THREE.MeshBasicMaterial({ map: textures.signs[bb.signIndex] }));
+      const panelMat = new THREE.MeshBasicMaterial({ map: textures.signs[bb.signIndex] });
+      const panel = new THREE.Mesh(new THREE.PlaneGeometry(12, 4), panelMat);
       panel.position.set(bb.x + Math.sin(bb.rotY) * 0.2, bb.y + 6.4, bb.z + Math.cos(bb.rotY) * 0.2);
       panel.rotation.y = bb.rotY;
       group.add(panel);
@@ -992,7 +1157,11 @@ export function buildCity(scene, textures, rng) {
 
   // Park: lawn, crossing paths, fountain basin with a glowing water disc, broadleaf trees.
   for (const pk of parks) {
-    const lawn = new THREE.Mesh(new THREE.PlaneGeometry(pk.half * 2, pk.half * 2), new THREE.MeshLambertMaterial({ map: textures.grass || null, color: textures.grass ? 0xffffff : 0x5c9a4a }));
+    const lawnMat = new THREE.MeshLambertMaterial({
+      map: textures.grass || null,
+      color: textures.grass ? 0xffffff : 0x5c9a4a,
+    });
+    const lawn = new THREE.Mesh(new THREE.PlaneGeometry(pk.half * 2, pk.half * 2), lawnMat);
     lawn.rotation.x = -Math.PI / 2;
     lawn.position.set(pk.x, 0.235, pk.z);
     lawn.receiveShadow = true;
@@ -1006,18 +1175,28 @@ export function buildCity(scene, textures, rng) {
     }
   }
   for (const pf of parkFeatures) {
-    const basin = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 3.6, 0.8, 18), new THREE.MeshLambertMaterial({ color: 0xcfc3b0 }));
+    const basin = new THREE.Mesh(
+      new THREE.CylinderGeometry(3.4, 3.6, 0.8, 18),
+      new THREE.MeshLambertMaterial({ color: 0xcfc3b0 }),
+    );
     basin.position.set(pf.x, 0.6, pf.z);
     const pool = new THREE.Mesh(new THREE.CircleGeometry(3.0, 18), new THREE.MeshBasicMaterial({ color: 0x4fd6e0 }));
     pool.rotation.x = -Math.PI / 2;
     pool.position.set(pf.x, 1.02, pf.z);
-    const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.45, 2.2, 8), new THREE.MeshLambertMaterial({ color: 0xe8ddcc }));
+    const spout = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.25, 0.45, 2.2, 8),
+      new THREE.MeshLambertMaterial({ color: 0xe8ddcc }),
+    );
     spout.position.set(pf.x, 2.0, pf.z);
     group.add(basin, pool, spout);
   }
   if (canopyTrees.length > 0) {
-    const ctTrunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.32, 3.2, 6).translate(0, 1.6, 0), trunkMat, canopyTrees.length);
-    const ctCrown = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(2.4, 0), new THREE.MeshLambertMaterial({ color: 0x3f8a3e, flatShading: true }), canopyTrees.length);
+    const crownGeo = new THREE.IcosahedronGeometry(2.4, 0);
+    const crownMat = new THREE.MeshLambertMaterial({ color: 0x3f8a3e, flatShading: true });
+    const ctTrunkGeo = new THREE.CylinderGeometry(0.22, 0.32, 3.2, 6);
+    ctTrunkGeo.translate(0, 1.6, 0);
+    const ctTrunk = new THREE.InstancedMesh(ctTrunkGeo, trunkMat, canopyTrees.length);
+    const ctCrown = new THREE.InstancedMesh(crownGeo, crownMat, canopyTrees.length);
     canopyTrees.forEach((t, i) => {
       dummy.position.set(t.x, 0.22, t.z);
       dummy.rotation.set(0, t.s * 3, 0);
@@ -1034,13 +1213,18 @@ export function buildCity(scene, textures, rng) {
   // Pier: a timber deck running from the beach out over the water on pilings, with a bait shack.
   {
     const len = pier.x1 - pier.x0;
-    const deckMat = new THREE.MeshLambertMaterial({ map: textures.planks || null, color: textures.planks ? 0xffffff : 0xa47b55 });
+    const deckMat = new THREE.MeshLambertMaterial({
+      map: textures.planks || null,
+      color: textures.planks ? 0xffffff : 0xa47b55,
+    });
     const deck = new THREE.Mesh(new THREE.BoxGeometry(len, 0.3, pier.halfW * 2), deckMat);
     deck.position.set(pier.x0 + len * 0.5, 0.18, pier.z);
     deck.receiveShadow = true;
     group.add(deck);
+
     const pileCount = Math.floor(len / 7) * 2;
-    const pileInst = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.22, 2.6, 6), new THREE.MeshLambertMaterial({ color: 0x5b4130 }), pileCount + 2);
+    const pileGeo = new THREE.CylinderGeometry(0.22, 0.22, 2.6, 6);
+    const pileInst = new THREE.InstancedMesh(pileGeo, new THREE.MeshLambertMaterial({ color: 0x5b4130 }), pileCount + 2);
     let pi = 0;
     for (let x = pier.x0 + 3; pi < pileCount; x += 7) {
       for (const side of [-1, 1]) {
@@ -1059,15 +1243,23 @@ export function buildCity(scene, textures, rng) {
       pileInst.setMatrixAt(pi++, dummy.matrix);
     }
     group.add(pileInst);
+
     const railMat = new THREE.MeshLambertMaterial({ color: 0xf2e6d4 });
     for (const side of [-1, 1]) {
       const rail = new THREE.Mesh(new THREE.BoxGeometry(len, 0.12, 0.12), railMat);
       rail.position.set(pier.x0 + len * 0.5, 1.25, pier.z + side * (pier.halfW - 0.1));
       group.add(rail);
     }
-    const shack = new THREE.Mesh(new THREE.BoxGeometry(5, 3, 4.4), new THREE.MeshLambertMaterial({ color: 0x3fb7c4 }));
+
+    const shack = new THREE.Mesh(
+      new THREE.BoxGeometry(5, 3, 4.4),
+      new THREE.MeshLambertMaterial({ color: 0x3fb7c4 }),
+    );
     shack.position.set(pier.x1 - 6, 1.83, pier.z);
-    const shackRoof = new THREE.Mesh(new THREE.ConeGeometry(3.9, 1.4, 4), new THREE.MeshLambertMaterial({ color: 0xff6b5a }));
+    const shackRoof = new THREE.Mesh(
+      new THREE.ConeGeometry(3.9, 1.4, 4),
+      new THREE.MeshLambertMaterial({ color: 0xff6b5a }),
+    );
     shackRoof.rotation.y = Math.PI / 4;
     shackRoof.position.set(pier.x1 - 6, 4.03, pier.z);
     group.add(shack, shackRoof);
@@ -1120,10 +1312,21 @@ export function buildCity(scene, textures, rng) {
       const alongX = propRng.chance(0.5);
       const ox = alongX ? propRng.range(-rt.w * 0.38, rt.w * 0.38) : side * rt.w * 0.36;
       const oz = alongX ? side * rt.d * 0.36 : propRng.range(-rt.d * 0.38, rt.d * 0.38);
-      acUnits.push({ x: rt.x + ox, y: rt.top + 0.22 + 0.55, z: rt.z + oz, rot: alongX ? 0 : Math.PI / 2, s: propRng.range(0.85, 1.25) });
+      acUnits.push({
+        x: rt.x + ox,
+        y: rt.top + 0.22 + 0.55,
+        z: rt.z + oz,
+        rot: alongX ? 0 : Math.PI / 2,
+        s: propRng.range(0.85, 1.25),
+      });
     }
     if (rt.district === 'downtown' && rt.top > CITY_GEN.antennaMinHeight && propRng.chance(0.7)) {
-      antennas.push({ x: rt.x + propRng.range(-1.5, 1.5), y: rt.top + 0.22, z: rt.z + propRng.range(-1.5, 1.5), h: propRng.range(6, 13) });
+      antennas.push({
+        x: rt.x + propRng.range(-1.5, 1.5),
+        y: rt.top + 0.22,
+        z: rt.z + propRng.range(-1.5, 1.5),
+        h: propRng.range(6, 13),
+      });
     }
   }
   if (acUnits.length > 0) {
@@ -1141,8 +1344,11 @@ export function buildCity(scene, textures, rng) {
   if (antennas.length > 0) {
     const mastGeo = new THREE.CylinderGeometry(0.08, 0.2, 1, 5);
     mastGeo.translate(0, 0.5, 0);
-    const mastInst = new THREE.InstancedMesh(mastGeo, new THREE.MeshLambertMaterial({ color: 0x5a5f6b }), antennas.length);
-    const tipInst = new THREE.InstancedMesh(new THREE.BoxGeometry(0.42, 0.42, 0.42), new THREE.MeshBasicMaterial({ color: 0xff3348 }), antennas.length);
+    const mastMat = new THREE.MeshLambertMaterial({ color: 0x5a5f6b });
+    const tipGeo = new THREE.BoxGeometry(0.42, 0.42, 0.42);
+    const tipMat = new THREE.MeshBasicMaterial({ color: 0xff3348 });
+    const mastInst = new THREE.InstancedMesh(mastGeo, mastMat, antennas.length);
+    const tipInst = new THREE.InstancedMesh(tipGeo, tipMat, antennas.length);
     antennas.forEach((a, i) => {
       dummy.position.set(a.x, a.y, a.z);
       dummy.rotation.set(0, 0, 0);
@@ -1167,7 +1373,8 @@ export function buildCity(scene, textures, rng) {
       { ox: 2.3, oy: 2.0, oz: 0.75, sx: 0.08, sy: 0.7, sz: 0.55, color: 0xffb347 },
       { ox: 0, oy: 0.55, oz: -0.45, sx: 2.6, sy: 0.1, sz: 0.45, color: 0x8c5f3e },
     ];
-    const shelterInst = new THREE.InstancedMesh(unitBox, new THREE.MeshLambertMaterial({ color: 0xffffff }), busStops.length * parts.length);
+    const shelterMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const shelterInst = new THREE.InstancedMesh(unitBox, shelterMat, busStops.length * parts.length);
     let si = 0;
     for (const bs of busStops) {
       const cos = Math.cos(bs.rot);
@@ -1242,7 +1449,7 @@ export function buildCity(scene, textures, rng) {
           pos.x += (dx / dist) * push;
           pos.z += (dz / dist) * push;
         } else {
-          // Inside box: push out along nearest face
+          // Circle centre is inside the box: push out along the nearest face.
           const dl = Math.abs(pos.x - c.minX);
           const dr = Math.abs(c.maxX - pos.x);
           const dt = Math.abs(pos.z - c.minZ);
@@ -1263,35 +1470,65 @@ export function buildCity(scene, textures, rng) {
       const lim = pier.halfW - 0.3;
       const nearPier = Math.abs(pos.z - pier.z) < pier.halfW + 1.5;
       if (nearPier) {
-        if (pos.z > pier.z + lim) { pos.z = pier.z + lim; hitBound = true; }
-        if (pos.z < pier.z - lim) { pos.z = pier.z - lim; hitBound = true; }
-        if (pos.x > pier.x1 - 1) { pos.x = pier.x1 - 1; hitBound = true; }
+        if (pos.z > pier.z + lim) {
+          pos.z = pier.z + lim;
+          hitBound = true;
+        }
+        if (pos.z < pier.z - lim) {
+          pos.z = pier.z - lim;
+          hitBound = true;
+        }
+        if (pos.x > pier.x1 - 1) {
+          pos.x = pier.x1 - 1;
+          hitBound = true;
+        }
       } else {
         pos.x = CITY.waterStartX - 2;
         hitBound = true;
       }
     }
     if (pos.x < -CITY.halfSpanX - 18) {
-      if (pos.z < annex.minZ + radius) { pos.z = annex.minZ + radius; hitBound = true; }
-      if (pos.z > annex.maxZ - radius) { pos.z = annex.maxZ - radius; hitBound = true; }
+      if (pos.z < annex.minZ + radius) {
+        pos.z = annex.minZ + radius;
+        hitBound = true;
+      }
+      if (pos.z > annex.maxZ - radius) {
+        pos.z = annex.maxZ - radius;
+        hitBound = true;
+      }
     }
-    if (pos.x < annex.minX - 4) { pos.x = annex.minX - 4; hitBound = true; }
-    if (pos.z > CITY.halfSpanZ + 18) { pos.z = CITY.halfSpanZ + 18; hitBound = true; }
-    if (pos.z < -CITY.halfSpanZ - 18) { pos.z = -CITY.halfSpanZ - 18; hitBound = true; }
+    if (pos.x < annex.minX - 4) {
+      pos.x = annex.minX - 4;
+      hitBound = true;
+    }
+    if (pos.z > CITY.halfSpanZ + 18) {
+      pos.z = CITY.halfSpanZ + 18;
+      hitBound = true;
+    }
+    if (pos.z < -CITY.halfSpanZ - 18) {
+      pos.z = -CITY.halfSpanZ - 18;
+      hitBound = true;
+    }
     return hitBound;
   }
 
   // Nearest road centreline point, used by police pathing and roadblocks. Covers both grids.
   function nearestRoadNode(x, z) {
     let best = null;
-    let bestD = Infinity;
+    let bestDist = Infinity;
     for (const it of intersections) {
       const d = (it.x - x) ** 2 + (it.z - z) ** 2;
-      if (d < bestD) { bestD = d; best = it; }
+      if (d < bestDist) {
+        bestDist = d;
+        best = it;
+      }
     }
     for (const it of annex.intersections) {
       const d = (it.x - x) ** 2 + (it.z - z) ** 2;
-      if (d < bestD) { bestD = d; best = it; }
+      if (d < bestDist) {
+        bestDist = d;
+        best = it;
+      }
     }
     return best;
   }
@@ -1311,7 +1548,7 @@ export function buildCity(scene, textures, rng) {
     return false;
   }
 
-  // Coarse line-of-sight on the XZ plane: march in steps no longer than half a cell and test the
+  // Coarse line-of-sight on the XZ plane: march in steps no longer than two metres and test the
   // spatial index at each sample. Good enough for "can the officer see the player".
   function hasLineOfSight(ax, az, bx, bz, eyeHeight = 1.6) {
     const dx = bx - ax;
@@ -1330,11 +1567,19 @@ export function buildCity(scene, textures, rng) {
     const half = CITY.roadWidth * 0.5;
     let onNS = false;
     let onEW = false;
-    for (const rx of roadCentersX) if (Math.abs(x - rx) < half && z > startZ - half && z < -startZ + half) onNS = true;
-    for (const rz of roadCentersZ) if (Math.abs(z - rz) < half && x > startX - half && x < -startX + half) onEW = true;
+    for (const rx of roadCentersX) {
+      if (Math.abs(x - rx) < half && z > startZ - half && z < -startZ + half) onNS = true;
+    }
+    for (const rz of roadCentersZ) {
+      if (Math.abs(z - rz) < half && x > startX - half && x < -startX + half) onEW = true;
+    }
     if (!onNS && !onEW) {
-      for (const rx of annex.roadX) if (Math.abs(x - rx) < half && z > annex.minZ && z < annex.maxZ) onNS = true;
-      for (const rz of annex.roadZ) if (Math.abs(z - rz) < half && x > annex.minX && x < annex.maxX + half) onEW = true;
+      for (const rx of annex.roadX) {
+        if (Math.abs(x - rx) < half && z > annex.minZ && z < annex.maxZ) onNS = true;
+      }
+      for (const rz of annex.roadZ) {
+        if (Math.abs(z - rz) < half && x > annex.minX && x < annex.maxX + half) onEW = true;
+      }
     }
     if (onNS && onEW) return 'intersection';
     return onNS ? 'ns' : onEW ? 'ew' : null;

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
-import { PALETTE, TIME_OF_DAY, sampleTimeOfDay } from './config.js';
+import { FIXED_DT, FRAME_BUDGET, PALETTE, QUALITY_ORDER, QUALITY_TIERS, TIME_OF_DAY, sampleTimeOfDay } from './config.js';
 
-// Fullscreen-triangle vertex shader shared by the post passes.
+// Fullscreen-triangle vertex shader shared by both post passes. Positions come straight from the
+// geometry attribute, so the mesh needs no camera transform at all.
 const FS_VERT = /* glsl */ `
 varying vec2 vUv;
 void main() {
@@ -30,8 +31,8 @@ void main() {
 }
 `;
 
-// Composite: scene + soft additive glow (13-tap blur of the quarter-res bright buffer),
-// then a gentle warm vignette, then the renderer's tone mapping and output colour space.
+// Composite: scene + soft additive glow (13-tap blur of the quarter-res bright buffer), then a
+// gentle warm vignette, then the renderer's tone mapping and output colour space.
 const COMPOSITE_FRAG = /* glsl */ `
 uniform sampler2D tScene;
 uniform sampler2D tGlow;
@@ -62,23 +63,28 @@ void main() {
 }
 `;
 
+// One oversized triangle covering the whole clip space (cheaper than a quad and avoids the
+// diagonal seam a two-triangle quad can show with additive blending).
 function makeFullscreenTriangle() {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
   return geo;
 }
 
+// Builds the renderer, scene, sky, lights and post chain, and returns the rig the rest of the game
+// drives: call render() once per frame and updateAtmosphere() as the camera follows the player.
 export function createRenderRig(canvas, textures) {
   const params = new URLSearchParams(window.location.search);
-  // Validate canvas exists before creating renderer.
   if (!canvas || !canvas.getContext) {
     console.error('createRenderRig: invalid canvas element');
     return null;
   }
+
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
     powerPreference: 'high-performance',
+    // Shots are read back as PNG, so the drawing buffer must survive the compositor step.
     preserveDrawingBuffer: true,
   });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -88,6 +94,7 @@ export function createRenderRig(canvas, textures) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Stats are collected once per frame by the caller, so nothing resets them implicitly.
   renderer.info.autoReset = false;
 
   const scene = new THREE.Scene();
@@ -95,7 +102,7 @@ export function createRenderRig(canvas, textures) {
 
   const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.25, 1600);
 
-  // Sky dome
+  // Sky dome: a huge inward-facing sphere that follows the camera horizontally.
   const skyGeo = new THREE.SphereGeometry(950, 24, 16);
   const skyMat = new THREE.MeshBasicMaterial({
     map: textures.sky,
@@ -106,10 +113,10 @@ export function createRenderRig(canvas, textures) {
   const skyDome = new THREE.Mesh(skyGeo, skyMat);
   scene.add(skyDome);
 
-  // Golden-hour sun direction (low over the horizon for warm key light and long shadows)
+  // Golden-hour sun direction: low over the sea, giving warm key light and long shadows.
   const sunDir = new THREE.Vector3(0.45, 0.22, -0.86).normalize();
 
-  // Sun disc + additive lens flare sprites
+  // Sun disc plus an additive halo sprite behind it.
   const sunGroup = new THREE.Group();
   const sunCoreMat = new THREE.SpriteMaterial({
     map: textures.sunFlare,
@@ -136,7 +143,7 @@ export function createRenderRig(canvas, textures) {
   sunGroup.add(sunHalo);
   scene.add(sunGroup);
 
-  // Primary lights: one HemisphereLight + one shadow-casting DirectionalLight
+  // Lighting: exactly one hemisphere fill and one shadow-casting directional key light.
   const baseHemiIntensity = 0.92;
   const baseSunIntensity = 2.25;
   const hemiLight = new THREE.HemisphereLight(PALETTE.hemiSky, PALETTE.hemiGround, baseHemiIntensity);
@@ -148,11 +155,11 @@ export function createRenderRig(canvas, textures) {
   sunLight.shadow.mapSize.set(1024, 1024);
   sunLight.shadow.camera.near = 20;
   sunLight.shadow.camera.far = 420;
-  const s = 95;
-  sunLight.shadow.camera.left = -s;
-  sunLight.shadow.camera.right = s;
-  sunLight.shadow.camera.top = s;
-  sunLight.shadow.camera.bottom = -s;
+  const shadowExtent = 95;
+  sunLight.shadow.camera.left = -shadowExtent;
+  sunLight.shadow.camera.right = shadowExtent;
+  sunLight.shadow.camera.top = shadowExtent;
+  sunLight.shadow.camera.bottom = -shadowExtent;
   // Bias tuned for the low sun: a small constant bias plus a normal offset removes acne on the
   // long grazing faces without the peter-panning a large constant bias causes.
   sunLight.shadow.bias = -0.00035;
@@ -184,6 +191,7 @@ export function createRenderRig(canvas, textures) {
     depthWrite: false,
     toneMapped: false,
   });
+
   const compositeMat = new THREE.ShaderMaterial({
     uniforms: {
       tScene: { value: null },
@@ -198,15 +206,19 @@ export function createRenderRig(canvas, textures) {
     depthTest: false,
     depthWrite: false,
   });
+
   const brightScene = new THREE.Scene();
   const brightQuad = new THREE.Mesh(fsTri, brightMat);
   brightQuad.frustumCulled = false;
   brightScene.add(brightQuad);
+
   const compositeScene = new THREE.Scene();
   const compositeQuad = new THREE.Mesh(fsTri, compositeMat);
   compositeQuad.frustumCulled = false;
   compositeScene.add(compositeQuad);
 
+  // Size the scene target to the drawing buffer (device pixels) and the glow target to a quarter
+  // of it; both are reallocated on resize, disposing the previous pair first.
   function allocTargets() {
     const size = renderer.getDrawingBufferSize(new THREE.Vector2());
     const w = Math.max(2, Math.floor(size.x));
@@ -220,7 +232,11 @@ export function createRenderRig(canvas, textures) {
     });
     const gw = Math.max(2, Math.floor(w / 4));
     const gh = Math.max(2, Math.floor(h / 4));
-    glowRT = new THREE.WebGLRenderTarget(gw, gh, { type: canHalf ? THREE.HalfFloatType : THREE.UnsignedByteType, depthBuffer: false });
+    glowRT = new THREE.WebGLRenderTarget(gw, gh, {
+      type: canHalf ? THREE.HalfFloatType : THREE.UnsignedByteType,
+      depthBuffer: false,
+    });
+    // A slightly wider tap spread hides the quarter-res blockiness of the bright buffer.
     brightMat.uniforms.texel.value.set(1 / w * 1.5, 1 / h * 1.5);
     compositeMat.uniforms.glowTexel.value.set(1 / gw, 1 / gh);
   }
@@ -229,6 +245,7 @@ export function createRenderRig(canvas, textures) {
     try {
       allocTargets();
     } catch {
+      // Without render targets the scene still draws straight to the canvas.
       postEnabled = false;
     }
   }
@@ -236,7 +253,7 @@ export function createRenderRig(canvas, textures) {
   function render() {
     // Count every pass of one frame together (scene + bright pass + composite).
     renderer.info.reset();
-    if (!postEnabled) {
+    if (!postEnabled || !sceneRT || !glowRT) {
       renderer.render(scene, camera);
       return;
     }
@@ -272,6 +289,8 @@ export function createRenderRig(canvas, textures) {
     skyMat.color.copy(baseSkyTint).lerp(tmpColor, 0.15).multiplyScalar(0.55 + 0.45 * Math.min(1, k));
   }
 
+  // Keep the sky dome and sun centred on the player, and slide the shadow frustum along with them
+  // (snapped to whole shadow-map texels so the shadow edges do not crawl as you drive).
   function updateAtmosphere(anchorPos, time = 0) {
     if (rig.dayCycle) {
       const swing = Math.sin((time / TIME_OF_DAY.dayLengthSeconds) * Math.PI * 2) * 0.1;
@@ -283,8 +302,7 @@ export function createRenderRig(canvas, textures) {
       Math.max(52, sunDir.y * 780),
       anchorPos.z + sunDir.z * 780,
     );
-    // Snap the shadow camera to whole shadow-map texels so shadows do not shimmer as you move.
-    const texel = (s * 2) / sunLight.shadow.mapSize.x;
+    const texel = (shadowExtent * 2) / sunLight.shadow.mapSize.x;
     const ax = Math.round(anchorPos.x / texel) * texel;
     const az = Math.round(anchorPos.z / texel) * texel;
     sunLight.position.set(
@@ -307,47 +325,39 @@ export function createRenderRig(canvas, textures) {
 
   window.addEventListener('resize', resize);
 
-  // --- Quality tier management & dynamic resolution scaling ----------------------------------------
-  // The frame-budget guard monitors frame time and switches quality tiers to maintain target FPS.
-  // If the smoothed frame time exceeds downshiftMs for windowFrames in a row, drop one tier.
-  // If it stays below upshiftMs for twice as long, climb back up.
+  // --- Quality tier management & dynamic resolution scaling ------------------------------------
+  // The frame-budget guard watches frame time and walks the tier ladder: one step down after
+  // windowFrames over-budget frames, one step up after twice as many comfortable ones.
   let currentTier = 'medium';
   let tierAdjustTimer = 0;
   let frameTimeSmoothed = 16.7;
-  let pixelRatioOverride = 1.0;
+  const pixelRatioOverride = 1.0;
 
   function setQualityTier(tier) {
-    currentTier = tier;
     const tierCfg = QUALITY_TIERS[tier];
     if (!tierCfg) return;
-
+    currentTier = tier;
     renderer.setPixelRatio(tierCfg.pixelRatio * pixelRatioOverride);
     sunLight.shadow.mapSize.set(tierCfg.shadowMapSize, tierCfg.shadowMapSize);
     sunLight.castShadow = tierCfg.shadows;
     scene.fog.far = tierCfg.drawDistance;
-
     if (postEnabled && !tierCfg.post) postEnabled = false;
   }
 
   function updateQualityGate(frameMs) {
     frameTimeSmoothed = frameTimeSmoothed * (1 - FRAME_BUDGET.smoothing) + frameMs * FRAME_BUDGET.smoothing;
-
     if (frameTimeSmoothed > FRAME_BUDGET.downshiftMs) {
       tierAdjustTimer += 1;
-      if (tierAdjustTimer >= FRAME_BUDGET.windowFrames) {
-        const idx = QUALITY_ORDER.indexOf(currentTier);
-        if (idx < QUALITY_ORDER.length - 1) {
-          setQualityTier(QUALITY_ORDER[idx + 1]);
-        }
+      const idx = QUALITY_ORDER.indexOf(currentTier);
+      if (tierAdjustTimer >= FRAME_BUDGET.windowFrames && idx < QUALITY_ORDER.length - 1) {
+        setQualityTier(QUALITY_ORDER[idx + 1]);
         tierAdjustTimer = 0;
       }
     } else if (frameTimeSmoothed < FRAME_BUDGET.upshiftMs) {
       tierAdjustTimer += 1;
-      if (tierAdjustTimer >= FRAME_BUDGET.windowFrames * 2) {
-        const idx = QUALITY_ORDER.indexOf(currentTier);
-        if (idx > 0) {
-          setQualityTier(QUALITY_ORDER[idx - 1]);
-        }
+      const idx = QUALITY_ORDER.indexOf(currentTier);
+      if (tierAdjustTimer >= FRAME_BUDGET.windowFrames * 2 && idx > 0) {
+        setQualityTier(QUALITY_ORDER[idx - 1]);
         tierAdjustTimer = 0;
       }
     } else {
@@ -355,39 +365,40 @@ export function createRenderRig(canvas, textures) {
     }
   }
 
-  // --- Frustum culling: skip rendering blocks outside the camera view -----
+  // --- Frustum culling -------------------------------------------------------------------------
+  // Only top-level meshes that carry their own bounding sphere are tested. Instances inside the
+  // city group are culled by their own systems, so this pass never touches them.
   const frustum = new THREE.Frustum();
   const projMatrix = new THREE.Matrix4();
-  const frustumCulled = new Set();
+  const culledByFrustum = new Set();
 
   function updateFrustumCull() {
     projMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     frustum.setFromProjectionMatrix(projMatrix);
-    frustumCulled.clear();
+    const worldPos = new THREE.Vector3();
+    // Forget objects that have since left the scene so the set cannot grow without bound.
+    for (const obj of culledByFrustum) {
+      if (obj.parent !== scene) culledByFrustum.delete(obj);
+    }
 
-    // Test each block mesh's bounding sphere
-    for (const block of scene.children) {
-      if (!block.geometry || !block.geometry.boundingSphere) continue;
-      if (!block.visible) continue;
-
-      const sphere = block.geometry.boundingSphere;
-      const worldPos = new THREE.Vector3();
-      block.getWorldPosition(worldPos);
-      const worldSphere = new THREE.Sphere(worldPos, sphere.radius);
-
-      if (!frustum.intersectsSphere(worldSphere)) {
-        block.visible = false;
-        frustumCulled.add(block);
-      } else if (frustumCulled.has(block)) {
-        block.visible = true;
-        frustumCulled.delete(block);
+    for (const obj of scene.children) {
+      if (!obj.geometry || !obj.geometry.boundingSphere) continue;
+      obj.getWorldPosition(worldPos);
+      const worldSphere = new THREE.Sphere(worldPos, obj.geometry.boundingSphere.radius);
+      if (frustum.intersectsSphere(worldSphere)) {
+        // Re-show only what this pass hid; objects hidden by their own systems stay hidden.
+        if (culledByFrustum.delete(obj)) obj.visible = true;
+      } else if (obj.visible) {
+        obj.visible = false;
+        culledByFrustum.add(obj);
       }
     }
   }
 
-  // --- Main render loop with fixed timestep & frame interpolation --------
-  // The game runs at FIXED_DT (1/60), but renders interpolated between ticks.
-  // This decouples simulation from frame rate and prevents stuttering.
+  // --- Optional self-driven loop ---------------------------------------------------------------
+  // The game runs its own fixed-step loop in main.js and calls render() itself, so this internal
+  // loop only runs for embedders that hand the rig an onTick or getCameraTarget handler. Without
+  // one it bows out on the first frame, leaving rendering entirely to the caller.
   let lastTime = performance.now();
   let accumulator = 0;
   let running = true;
@@ -397,70 +408,55 @@ export function createRenderRig(canvas, textures) {
 
   function renderLoop(now) {
     if (!running) return;
+    if (!rig.onTick && !rig.getCameraTarget) {
+      running = false;
+      return;
+    }
 
-    const dt = Math.min((now - lastTime) / 1000, 0.05); // Cap at 50ms to prevent spiral
+    const dt = Math.min((now - lastTime) / 1000, 0.05); // cap at 50 ms so a hitch cannot spiral
     lastTime = now;
     accumulator += dt;
 
-    // Let the game controller know how many fixed ticks are queued
+    // Tell the game how many fixed ticks are queued and how far into the next one we are.
     rig.ticksQueued = 0;
     while (accumulator >= FIXED_DT) {
       rig.ticksQueued += 1;
       accumulator -= FIXED_DT;
     }
-
-    // Interpolation factor: 0 at the last tick, 1 just before the next tick
     rig.interpolation = accumulator / FIXED_DT;
 
-    // Call the game's main simulation, which processes ticks and renderable state
     if (rig.onTick) rig.onTick(rig.ticksQueued, rig.interpolation);
 
-    // Update camera position and atmosphere based on player/vehicle position
     if (rig.getCameraTarget) {
       const target = rig.getCameraTarget();
       updateAtmosphere(target.position, target.time ?? 0);
     }
 
-    // Cull blocks outside the frustum
     updateFrustumCull();
-
-    // Render the scene (scene pass + post passes if enabled)
     const startMs = performance.now();
     render();
-    const frameMs = performance.now() - startMs;
-
-    // Update the frame-budget guard
-    updateQualityGate(frameMs);
-
+    updateQualityGate(performance.now() - startMs);
     requestAnimationFrame(renderLoop);
   }
 
-  // --- Cleanup and resource disposal ------
-  rig.dispose = function() {
+  // --- Cleanup ---------------------------------------------------------------------------------
+  rig.dispose = function dispose() {
     running = false;
     window.removeEventListener('resize', resize);
 
-    // Dispose all geometries and materials
     scene.traverse((obj) => {
       if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) {
-        if (Array.isArray(obj.material)) {
-          obj.material.forEach(m => m.dispose());
-        } else {
-          obj.material.dispose();
-        }
-      }
+      const material = obj.material;
+      if (!material) return;
+      if (Array.isArray(material)) material.forEach((m) => m.dispose());
+      else material.dispose();
     });
 
-    // Dispose render targets
     if (sceneRT) sceneRT.dispose();
     if (glowRT) glowRT.dispose();
-
-    // Dispose the renderer and its WebGL context
     renderer.dispose();
   };
 
-  // Start the loop
   requestAnimationFrame(renderLoop);
 
   return Object.assign(rig, {

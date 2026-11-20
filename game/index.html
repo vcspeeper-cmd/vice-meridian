@@ -647,6 +647,7 @@
 // main.js can read window.VMFront the moment it boots.
 (function () {
   'use strict';
+
   var SETTINGS_KEY = 'vice-meridian-settings-v1';
   var DEFAULTS = {
     quality: 'auto', fov: 62, sensitivity: 1, invertY: false, volume: 80, difficulty: 'normal',
@@ -655,28 +656,29 @@
   var QUALITY = ['auto', 'low', 'medium', 'high'];
   var DIFFICULTY = ['easy', 'normal', 'hard'];
   var params = new URLSearchParams(window.location.search);
+  // Screenshot captures must be deterministic: settings are not loaded or stored in shot mode.
   var shotMode = params.has('shot');
 
-  function clampNum(v, lo, hi, fallback) {
-    var n = Number(v);
+  function clampNum(value, lo, hi, fallback) {
+    var n = Number(value);
     if (!isFinite(n)) return fallback;
     return n < lo ? lo : n > hi ? hi : n;
   }
 
   // Validate every field so a hand-edited or stale localStorage entry can never break the game.
   function sanitize(raw) {
-    var s = {};
-    raw = raw && typeof raw === 'object' ? raw : {};
-    s.quality = QUALITY.indexOf(raw.quality) >= 0 ? raw.quality : DEFAULTS.quality;
-    s.fov = Math.round(clampNum(raw.fov, 50, 95, DEFAULTS.fov));
-    s.sensitivity = Math.round(clampNum(raw.sensitivity, 0.2, 3, DEFAULTS.sensitivity) * 100) / 100;
-    s.invertY = raw.invertY === true || raw.invertY === '1' || raw.invertY === 1;
-    s.volume = Math.round(clampNum(raw.volume, 0, 100, DEFAULTS.volume));
-    s.difficulty = DIFFICULTY.indexOf(raw.difficulty) >= 0 ? raw.difficulty : DEFAULTS.difficulty;
-    s.reduceMotion = raw.reduceMotion === true;
-    s.highContrast = raw.highContrast === true;
-    s.largeHud = raw.largeHud === true;
-    return s;
+    var src = raw && typeof raw === 'object' ? raw : {};
+    var out = {};
+    out.quality = QUALITY.indexOf(src.quality) >= 0 ? src.quality : DEFAULTS.quality;
+    out.fov = Math.round(clampNum(src.fov, 50, 95, DEFAULTS.fov));
+    out.sensitivity = Math.round(clampNum(src.sensitivity, 0.2, 3, DEFAULTS.sensitivity) * 100) / 100;
+    out.invertY = src.invertY === true || src.invertY === '1' || src.invertY === 1;
+    out.volume = Math.round(clampNum(src.volume, 0, 100, DEFAULTS.volume));
+    out.difficulty = DIFFICULTY.indexOf(src.difficulty) >= 0 ? src.difficulty : DEFAULTS.difficulty;
+    out.reduceMotion = src.reduceMotion === true;
+    out.highContrast = src.highContrast === true;
+    out.largeHud = src.largeHud === true;
+    return out;
   }
 
   function loadSettings() {
@@ -685,7 +687,7 @@
     try {
       var raw = window.localStorage.getItem(SETTINGS_KEY);
       return sanitize(raw ? JSON.parse(raw) : DEFAULTS);
-    } catch (e) {
+    } catch (err) {
       return sanitize(DEFAULTS);
     }
   }
@@ -695,7 +697,11 @@
 
   function persist() {
     if (shotMode) return;
-    try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* storage disabled: keep the in-memory copy */ }
+    try {
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (err) {
+      // Storage disabled (private mode, quota): keep the in-memory copy only.
+    }
   }
 
   function applyBodyClasses() {
@@ -707,43 +713,68 @@
   function emit() {
     applyBodyClasses();
     for (var i = 0; i < listeners.length; i++) {
-      try { listeners[i](settings); } catch (e) { console.error(e); }
+      try {
+        listeners[i](settings);
+      } catch (err) {
+        console.error(err);
+      }
     }
   }
 
   function update(patch) {
     var next = {};
-    for (var k in settings) next[k] = settings[k];
-    for (var p in patch) next[p] = patch[p];
+    for (var key in settings) next[key] = settings[key];
+    for (var patchKey in patch) next[patchKey] = patch[patchKey];
     settings = sanitize(next);
     persist();
     syncForm();
     emit();
   }
 
-  function byId(id) { return document.getElementById(id); }
+  function byId(id) {
+    return document.getElementById(id);
+  }
 
   function syncForm() {
-    var q = byId('set-quality'); if (!q) return;
-    q.value = settings.quality; byId('out-quality').textContent = settings.quality.toUpperCase();
-    byId('set-fov').value = settings.fov; byId('out-fov').textContent = String(settings.fov);
-    byId('set-sens').value = settings.sensitivity; byId('out-sens').textContent = settings.sensitivity.toFixed(2);
-    byId('set-invert').value = settings.invertY ? '1' : '0'; byId('out-invert').textContent = settings.invertY ? 'ON' : 'OFF';
-    byId('set-volume').value = settings.volume; byId('out-volume').textContent = String(settings.volume);
-    byId('set-difficulty').value = settings.difficulty; byId('out-difficulty').textContent = settings.difficulty.toUpperCase();
+    var qualityEl = byId('set-quality');
+    if (!qualityEl) return;
+    qualityEl.value = settings.quality;
+    byId('out-quality').textContent = settings.quality.toUpperCase();
+    byId('set-fov').value = settings.fov;
+    byId('out-fov').textContent = String(settings.fov);
+    byId('set-sens').value = settings.sensitivity;
+    byId('out-sens').textContent = settings.sensitivity.toFixed(2);
+    byId('set-invert').value = settings.invertY ? '1' : '0';
+    byId('out-invert').textContent = settings.invertY ? 'ON' : 'OFF';
+    byId('set-volume').value = settings.volume;
+    byId('out-volume').textContent = String(settings.volume);
+    byId('set-difficulty').value = settings.difficulty;
+    byId('out-difficulty').textContent = settings.difficulty.toUpperCase();
     byId('set-reduce-motion').checked = settings.reduceMotion;
     byId('set-contrast').checked = settings.highContrast;
     byId('set-large-hud').checked = settings.largeHud;
   }
 
+  function selectTab(tab) {
+    var tabs = document.querySelectorAll('.front-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var selected = tabs[i] === tab;
+      tabs[i].setAttribute('aria-selected', selected ? 'true' : 'false');
+      var panel = byId(tabs[i].getAttribute('data-panel'));
+      if (panel) panel.classList.toggle('active', selected);
+    }
+  }
+
   function wireForm() {
-    // Validate that the form and all critical elements exist before wiring events.
     var form = byId('settings-form');
     if (!form) {
       console.warn('wireForm: settings form element not found');
       return;
     }
-    var bind = function (id, evt, fn) { var el = byId(id); if (el) el.addEventListener(evt, fn); };
+    var bind = function (id, eventName, handler) {
+      var el = byId(id);
+      if (el) el.addEventListener(eventName, handler);
+    };
     bind('set-quality', 'change', function (e) { update({ quality: e.target.value }); });
     bind('set-fov', 'input', function (e) { update({ fov: e.target.value }); });
     bind('set-sens', 'input', function (e) { update({ sensitivity: e.target.value }); });
@@ -754,8 +785,11 @@
     bind('set-contrast', 'change', function (e) { update({ highContrast: e.target.checked }); });
     bind('set-large-hud', 'change', function (e) { update({ largeHud: e.target.checked }); });
     bind('settings-reset', 'click', function () { update(DEFAULTS); });
+
     // Keep menu clicks from bubbling to the overlay's "click anywhere to play" handler.
-    var panels = byId('front-panels'); if (panels) panels.addEventListener('click', function (e) { e.stopPropagation(); });
+    var panels = byId('front-panels');
+    if (panels) panels.addEventListener('click', function (e) { e.stopPropagation(); });
+
     var tabs = document.querySelectorAll('.front-tab');
     for (var i = 0; i < tabs.length; i++) {
       tabs[i].addEventListener('click', function (e) {
@@ -766,19 +800,12 @@
         if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
         var all = Array.prototype.slice.call(document.querySelectorAll('.front-tab'));
         var idx = all.indexOf(e.currentTarget);
-        var next = all[(idx + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length];
-        selectTab(next); next.focus(); e.preventDefault();
+        var step = e.key === 'ArrowRight' ? 1 : all.length - 1;
+        var nextTab = all[(idx + step) % all.length];
+        selectTab(nextTab);
+        nextTab.focus();
+        e.preventDefault();
       });
-    }
-  }
-
-  function selectTab(tab) {
-    var tabs = document.querySelectorAll('.front-tab');
-    for (var i = 0; i < tabs.length; i++) {
-      var on = tabs[i] === tab;
-      tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
-      var panel = byId(tabs[i].getAttribute('data-panel'));
-      if (panel) panel.classList.toggle('active', on);
     }
   }
 
@@ -790,19 +817,24 @@
     vehicles: 'Fuelling traffic', peds: 'Filling the sidewalks', player: 'Waking Rico', police: 'Dispatching Meridian PD',
     combat: 'Loading the armoury', missions: 'Briefing Tessa', hud: 'Drawing the HUD', ready: 'Ready',
   };
+
   function progress(step) {
     var idx = STEPS.indexOf(step);
     if (idx < 0) return;
     var pct = Math.round(((idx + 1) / STEPS.length) * 100);
-    var fill = byId('loading-fill'); if (fill) fill.style.width = pct + '%';
-    var pctEl = byId('loading-pct'); if (pctEl) pctEl.textContent = pct + '%';
-    var stepEl = byId('loading-step'); if (stepEl) stepEl.textContent = LABELS[step];
-    var root = byId('loading'); if (root) root.setAttribute('aria-valuenow', String(pct));
+    var fill = byId('loading-fill');
+    if (fill) fill.style.width = pct + '%';
+    var pctEl = byId('loading-pct');
+    if (pctEl) pctEl.textContent = pct + '%';
+    var stepEl = byId('loading-step');
+    if (stepEl) stepEl.textContent = LABELS[step];
+    var root = byId('loading');
+    if (root) root.setAttribute('aria-valuenow', String(pct));
     var items = document.querySelectorAll('#loading-modules li');
     for (var i = 0; i < items.length; i++) {
-      var si = STEPS.indexOf(items[i].getAttribute('data-step'));
-      items[i].classList.toggle('done', si <= idx);
-      items[i].classList.toggle('active', si === idx + 1);
+      var stepIdx = STEPS.indexOf(items[i].getAttribute('data-step'));
+      items[i].classList.toggle('done', stepIdx <= idx);
+      items[i].classList.toggle('active', stepIdx === idx + 1);
     }
   }
 
@@ -814,35 +846,50 @@
     n = Math.imul(n ^ (n >>> 15), 0x2c1b3c6d);
     return ((n ^ (n >>> 13)) >>> 0) / 4294967296;
   }
+
   function startBackdrop() {
     var canvas = byId('title-backdrop');
     var overlay = byId('overlay');
     if (!canvas || shotMode) return;
     var ctx = canvas.getContext('2d');
     var t0 = performance.now();
+
     function draw(now) {
       requestAnimationFrame(draw);
       if (overlay.classList.contains('hidden') || settings.reduceMotion) return;
-      var w = canvas.clientWidth | 0, h = canvas.clientHeight | 0;
+      var w = canvas.clientWidth | 0;
+      var h = canvas.clientHeight | 0;
       if (w < 2 || h < 2) return;
-      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
       var t = (now - t0) / 1000;
       ctx.clearRect(0, 0, w, h);
       var horizon = h * 0.62;
+
       // Sun with horizontal cut bands that slide downward.
       var sunR = Math.min(w, h) * 0.42;
-      var sx = w * 0.5, sy = horizon - sunR * 0.18;
-      var g = ctx.createLinearGradient(0, sy - sunR, 0, sy + sunR);
-      g.addColorStop(0, 'rgba(255,236,150,0.9)'); g.addColorStop(0.55, 'rgba(255,128,80,0.85)'); g.addColorStop(1, 'rgba(255,60,120,0.8)');
+      var sx = w * 0.5;
+      var sy = horizon - sunR * 0.18;
+      var gradient = ctx.createLinearGradient(0, sy - sunR, 0, sy + sunR);
+      gradient.addColorStop(0, 'rgba(255,236,150,0.9)');
+      gradient.addColorStop(0.55, 'rgba(255,128,80,0.85)');
+      gradient.addColorStop(1, 'rgba(255,60,120,0.8)');
       ctx.save();
-      ctx.beginPath(); ctx.arc(sx, sy, sunR, Math.PI, 0); ctx.closePath(); ctx.clip();
-      ctx.fillStyle = g; ctx.fillRect(sx - sunR, sy - sunR, sunR * 2, sunR);
+      ctx.beginPath();
+      ctx.arc(sx, sy, sunR, Math.PI, 0);
+      ctx.closePath();
+      ctx.clip();
+      ctx.fillStyle = gradient;
+      ctx.fillRect(sx - sunR, sy - sunR, sunR * 2, sunR);
       ctx.globalCompositeOperation = 'destination-out';
-      for (var b = 0; b < 7; b++) {
-        var by = sy - sunR * 0.5 + ((b * 0.09 + t * 0.03) % 0.6) * sunR;
-        ctx.fillRect(sx - sunR, by, sunR * 2, 2 + b * 0.9);
+      for (var band = 0; band < 7; band++) {
+        var bandY = sy - sunR * 0.5 + ((band * 0.09 + t * 0.03) % 0.6) * sunR;
+        ctx.fillRect(sx - sunR, bandY, sunR * 2, 2 + band * 0.9);
       }
       ctx.restore();
+
       // Two skyline layers; the near one has lit windows that blink on a slow hash cycle.
       for (var layer = 0; layer < 2; layer++) {
         var speed = 6 + layer * 10;
@@ -859,40 +906,62 @@
             ctx.fillStyle = 'rgba(255,200,120,0.55)';
             for (var wy = horizon - bh + 6; wy < horizon - 6; wy += 9) {
               for (var wx = 4; wx < bw - 4; wx += 7) {
-                if (hash(col * 131 + (wx | 0) * 31 + (wy | 0) * 17 + Math.floor(t * 0.5)) > 0.72) ctx.fillRect(bx + wx, wy, 3, 4);
+                var lit = hash(col * 131 + (wx | 0) * 31 + (wy | 0) * 17 + Math.floor(t * 0.5)) > 0.72;
+                if (lit) ctx.fillRect(bx + wx, wy, 3, 4);
               }
             }
             ctx.fillStyle = 'rgba(22,12,36,0.95)';
           }
         }
       }
+
       // Ground and a perspective road grid scrolling towards the viewer.
-      ctx.fillStyle = 'rgba(14,8,26,0.92)'; ctx.fillRect(0, horizon, w, h - horizon);
-      ctx.strokeStyle = 'rgba(255,90,170,0.55)'; ctx.lineWidth = 1;
+      ctx.fillStyle = 'rgba(14,8,26,0.92)';
+      ctx.fillRect(0, horizon, w, h - horizon);
+      ctx.strokeStyle = 'rgba(255,90,170,0.55)';
+      ctx.lineWidth = 1;
       for (var k = 0; k < 14; k++) {
         var p = (k + (t * 0.8) % 1) / 14;
         var yy = horizon + (h - horizon) * p * p;
-        ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(w, yy); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, yy);
+        ctx.lineTo(w, yy);
+        ctx.stroke();
       }
       for (var v = -12; v <= 12; v++) {
-        ctx.beginPath(); ctx.moveTo(w * 0.5 + v * 8, horizon); ctx.lineTo(w * 0.5 + v * w * 0.12, h); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(w * 0.5 + v * 8, horizon);
+        ctx.lineTo(w * 0.5 + v * w * 0.12, h);
+        ctx.stroke();
       }
+
       // Swaying palms at both edges.
       for (var side = 0; side < 2; side++) {
         var px = side === 0 ? w * 0.08 : w * 0.92;
         var top = h * 0.22;
         var sway = Math.sin(t * 0.9 + side) * 10;
-        ctx.strokeStyle = 'rgba(10,6,18,0.95)'; ctx.lineWidth = 7;
-        ctx.beginPath(); ctx.moveTo(px, h); ctx.quadraticCurveTo(px + 6, h * 0.6, px + sway, top); ctx.stroke();
+        ctx.strokeStyle = 'rgba(10,6,18,0.95)';
+        ctx.lineWidth = 7;
+        ctx.beginPath();
+        ctx.moveTo(px, h);
+        ctx.quadraticCurveTo(px + 6, h * 0.6, px + sway, top);
+        ctx.stroke();
         ctx.lineWidth = 4;
         for (var f = 0; f < 7; f++) {
-          var a = (f / 7) * Math.PI * 2 + Math.sin(t + f) * 0.08;
-          ctx.beginPath(); ctx.moveTo(px + sway, top);
-          ctx.quadraticCurveTo(px + sway + Math.cos(a) * 34, top - 18 + Math.sin(a) * 8, px + sway + Math.cos(a) * 62, top + 16 + Math.abs(Math.sin(a)) * 12);
+          var angle = (f / 7) * Math.PI * 2 + Math.sin(t + f) * 0.08;
+          ctx.beginPath();
+          ctx.moveTo(px + sway, top);
+          ctx.quadraticCurveTo(
+            px + sway + Math.cos(angle) * 34,
+            top - 18 + Math.sin(angle) * 8,
+            px + sway + Math.cos(angle) * 62,
+            top + 16 + Math.abs(Math.sin(angle)) * 12,
+          );
           ctx.stroke();
         }
       }
     }
+
     requestAnimationFrame(draw);
   }
 
@@ -902,7 +971,8 @@
     onChange: function (fn) { listeners.push(fn); },
     progress: progress,
     setPaused: function (paused) {
-      var hint = byId('pause-hint'); if (hint) hint.style.display = paused ? 'block' : 'none';
+      var hint = byId('pause-hint');
+      if (hint) hint.style.display = paused ? 'block' : 'none';
     },
   };
 

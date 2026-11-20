@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { CITY, DIFFICULTY, POLICE_CFG, WANTED_CFG, WANTED_LEVELS } from './config.js';
 import { clamp, wrapAngle } from './random.js';
 
+// Blocky on-foot officer: dark suit, peaked cap, badge and a drawn sidearm. Everything is a
+// box, matching the low-poly look of the pedestrians and traffic.
 function createOfficerMesh(uniformColor = 0x1e2c48, accentColor = 0x4ca8ff) {
   const root = new THREE.Group();
   const suitMat = new THREE.MeshLambertMaterial({ color: uniformColor });
@@ -40,7 +42,10 @@ function createOfficerMesh(uniformColor = 0x1e2c48, accentColor = 0x4ca8ff) {
 // Striped sawhorse barrier used in roadblocks: bright white with red-emissive stripes.
 const BARRIER_GEO = new THREE.BoxGeometry(3.2, 0.5, 0.25);
 const BARRIER_MAT = new THREE.MeshLambertMaterial({ color: 0xf2f2f2, emissive: 0xff3040, emissiveIntensity: 0.25 });
+// Distance the lane target sits to the right of the node centre.
 const LANE_OFFSET = 3.6;
+// The four grid directions used when walking the street graph.
+const NEIGHBOUR_STEPS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
 export class PoliceManager {
   constructor(scene, city, vehicles, rng) {
@@ -80,9 +85,11 @@ export class PoliceManager {
   // Heat cools when the player is out of sight.
 
   starsForHeat(heat) {
-    const t = WANTED_CFG.heatPerStar;
+    const thresholds = WANTED_CFG.heatPerStar;
     let s = 0;
-    for (let i = 1; i < t.length; i++) if (heat >= t[i]) s = i;
+    for (let i = 1; i < thresholds.length; i++) {
+      if (heat >= thresholds[i]) s = i;
+    }
     // Clamp result to valid star range to prevent invalid states.
     return Math.min(POLICE_CFG.maxStars, Math.max(0, s));
   }
@@ -115,14 +122,14 @@ export class PoliceManager {
     this.escapeTimer = 0;
     this.bustTimer = 0;
     // Pursuers go back on patrol along the grid (surplus cruisers are recalled).
-    for (const c of this.pursuitCars) {
-      c.sirenActive = false;
-      if (c.aiMode !== 'police') continue;
-      if (this.patrols.length < POLICE_CFG.patrolCars + 1) this.beginPatrol(c);
-      else this.vehicles.removeVehicle(c);
+    for (const car of this.pursuitCars) {
+      car.sirenActive = false;
+      if (car.aiMode !== 'police') continue;
+      if (this.patrols.length < POLICE_CFG.patrolCars + 1) this.beginPatrol(car);
+      else this.vehicles.removeVehicle(car);
     }
     this.pursuitCars.length = 0;
-    for (const o of this.officers) this.scene.remove(o.mesh);
+    for (const officer of this.officers) this.scene.remove(officer.mesh);
     this.officers.length = 0;
     this.clearRoadblocks();
   }
@@ -147,7 +154,9 @@ export class PoliceManager {
     let best = null;
     let bestD = Infinity;
     for (const it of this.city.intersections) {
-      const d = (it.x - x) ** 2 + (it.z - z) ** 2;
+      const dx = it.x - x;
+      const dz = it.z - z;
+      const d = dx * dx + dz * dz;
       if (d < bestD) {
         bestD = d;
         best = it;
@@ -158,7 +167,7 @@ export class PoliceManager {
 
   neighbours(node) {
     const out = [];
-    for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    for (const [dc, dr] of NEIGHBOUR_STEPS) {
       const n = this.nodeMap.get(`${node.col + dc},${node.row + dr}`);
       if (n) out.push(n);
     }
@@ -181,6 +190,8 @@ export class PoliceManager {
     if (!this.patrols.includes(car)) this.patrols.push(car);
   }
 
+  // Space the initial patrol cars evenly across the intersection list so the whole map is
+  // covered rather than a random cluster.
   spawnPatrols(count = POLICE_CFG.patrolCars) {
     const nodes = this.city.intersections;
     for (let i = 0; i < count; i++) {
@@ -245,8 +256,11 @@ export class PoliceManager {
 
   // --- Spawning ------------------------------------------------------------------------------
 
+  // A cruiser that appears off-screen (or at a scripted spot) already running hot.
   spawnPursuitCruiser(playerPos, forcedPos = null, forcedHeading = null) {
-    let x, z, heading;
+    let x;
+    let z;
+    let heading;
     if (forcedPos) {
       x = forcedPos.x;
       z = forcedPos.z;
@@ -323,6 +337,7 @@ export class PoliceManager {
       meshes.push(bar);
     }
     const officers = [];
+    // Officers stand on the far side of the junction from the player.
     const back = alongZ ? Math.sign(node.z - player.pos.z) || 1 : Math.sign(node.x - player.pos.x) || 1;
     for (const side of [-1, 1]) {
       if (this.officers.length >= POLICE_CFG.maxOfficers + 2) break;
@@ -348,6 +363,7 @@ export class PoliceManager {
     this.roadblocks.length = 0;
   }
 
+  // Minimap dots for every police unit the player can currently know about.
   getBlips() {
     const list = [];
     for (const c of this.pursuitCars) {
@@ -373,6 +389,7 @@ export class PoliceManager {
       return;
     }
 
+    // Keep the pursuit fleet in proportion to the wanted level.
     const desiredCars = Math.min(POLICE_CFG.maxPursuitCars, this.stars);
     this.spawnTimer -= dt;
     if (this.pursuitCars.length < desiredCars && this.spawnTimer <= 0) {
@@ -397,6 +414,7 @@ export class PoliceManager {
       }
     }
 
+    // Track the closest unit and whether anything currently has eyes on the player.
     let nearestDistSq = Infinity;
     let seen = false;
     const sightSq = WANTED_CFG.sightRadius * WANTED_CFG.sightRadius;
@@ -405,6 +423,7 @@ export class PoliceManager {
     // Update pursuing police cruisers: path toward player, deploy officers, handle pursuit state machine.
     for (let i = this.pursuitCars.length - 1; i >= 0; i--) {
       const car = this.pursuitCars[i];
+      // The player stole this cruiser, or it was reassigned: it is no longer a pursuer.
       if (car === player.vehicle || car.aiMode !== 'police') {
         this.pursuitCars.splice(i, 1);
         continue;
@@ -446,6 +465,7 @@ export class PoliceManager {
         }
         this.steerCar(car, car.pathNode.x, car.pathNode.z, Math.max(24, playerSpeed + 7), dt, 2.5);
       } else {
+        // Close in: drive straight at the player's position.
         car.pathNode = null;
         const desiredSpeed = dist > 14 ? Math.max(24, playerSpeed + 7) : 10;
         this.steerCar(car, player.pos.x, player.pos.z, desiredSpeed, dt, 2.5);
@@ -456,6 +476,7 @@ export class PoliceManager {
       const playerStopped = !player.vehicle || playerSpeed < 4;
       if (playerStopped && dist < 26 && this.stars >= WANTED_CFG.officersOnFootStars - 1 && this.officers.length < POLICE_CFG.maxOfficers) {
         car.deployed = 2;
+        // Right-hand normal of the car heading, so the pair steps out on either side.
         const rx = Math.cos(car.heading);
         const rz = -Math.sin(car.heading);
         for (const side of [-1, 1]) {

@@ -13,7 +13,7 @@ export function sampleCone(dir, angle, rng, out = new THREE.Vector3()) {
   if (angle <= 0) return out.copy(dir);
   const r = Math.sqrt(rng.next()) * Math.tan(angle);
   const theta = rng.next() * Math.PI * 2;
-  // Orthonormal basis around dir.
+  // Build an orthonormal basis around dir; pick an up vector that is never parallel to it.
   if (Math.abs(dir.y) < 0.95) _up.set(0, 1, 0);
   else _up.set(1, 0, 0);
   _right.crossVectors(dir, _up).normalize();
@@ -38,8 +38,8 @@ class CasingPool {
   }
 
   spawn(pos, heading, rng) {
-    // Validate position to prevent NaN/Infinity corruption in casing pool.
-    if (!pos || !isFinite(pos.x) || !isFinite(pos.y) || !isFinite(pos.z)) {
+    // Reject a bad origin outright: one NaN would poison every matrix in the instanced mesh.
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) {
       return;
     }
     const rx = Math.cos(heading);
@@ -54,6 +54,7 @@ class CasingPool {
       life: 3.5,
       bounces: 0,
     };
+    // Fill the pool first, then recycle slots in a ring once it is full.
     if (this.items.length < this.size) this.items.push(c);
     else {
       this.items[this.next] = c;
@@ -78,6 +79,7 @@ class CasingPool {
         c.y += c.vy * dt;
         c.z += c.vz * dt;
         c.rot += c.spin * dt;
+        // Street level for a casing lying on its side.
         if (c.y < 0.26) {
           c.y = 0.26;
           c.vy = -c.vy * 0.35;
@@ -159,6 +161,7 @@ export class CombatSystem {
   // Push one confirmed hit for the HUD (hit markers, kill feed, damage numbers).
   registerHit(entry) {
     this.hitQueue.push({ t: this.time, ...entry });
+    // The queue is bounded so a long burst cannot grow it without limit if nobody is draining.
     if (this.hitQueue.length > COMBAT_CFG.hitQueueSize) this.hitQueue.shift();
   }
 
@@ -201,6 +204,7 @@ export class CombatSystem {
   spawnTracer(start, end, color = 0xffe48a, life = 0.14) {
     const dir = new THREE.Vector3().subVectors(end, start);
     const len = dir.length();
+    // Degenerate shots (muzzle inside geometry) would produce a zero-length cylinder.
     if (len < 0.1) return;
     const geo = new THREE.CylinderGeometry(0.032, 0.032, len, 4);
     geo.rotateX(Math.PI / 2);
@@ -240,7 +244,7 @@ export class CombatSystem {
     let hitPos = origin.clone().addScaledVector(dir, maxRange);
     let hitWorld = false;
 
-    // Check against building colliders (2D slab ray)
+    // Check against building colliders with a 2D slab ray in the x/z plane.
     for (const c of this.city.colliders) {
       let tmin = 0;
       let tmax = bestT;
@@ -261,6 +265,7 @@ export class CombatSystem {
         continue;
       }
       if (tmax >= tmin && tmin > 0.2 && tmin < bestT) {
+        // Only count the slab hit if the ray is still below the roof at that distance.
         const yAt = origin.y + dir.y * tmin;
         if (yAt >= 0 && yAt <= c.maxY + 0.3) {
           bestT = tmin;
@@ -287,6 +292,7 @@ export class CombatSystem {
       if (!t.alive) continue;
       const toX = t.pos.x - origin.x;
       const toZ = t.pos.z - origin.z;
+      // Project the target onto the shot in the horizontal plane only.
       const proj = toX * dir.x + toZ * dir.z;
       if (proj <= 0.3 || proj >= bestT) continue;
       const px = origin.x + dir.x * proj;
@@ -326,6 +332,7 @@ export class CombatSystem {
       this.hitMarkerKill = true;
       this.kills++;
       this.startRagdoll(target.mesh, dir, amount * (info.headshot ? 1.4 : 1));
+      // Bounty: gang members are worth more than a random patrol officer.
       if (player) player.money += target.faction === 'gang' ? 120 : 50;
     }
     this.registerHit({
@@ -338,6 +345,7 @@ export class CombatSystem {
       y: target.pos.y + 1.8,
       z: target.pos.z,
     });
+    // Shooting anyone but a gang member counts as a crime in the eyes of the police.
     if (police && target.faction !== 'gang') {
       police.reportCrime('shoot_officer', player ? player.pos : target.pos, 1.5);
     }
@@ -373,7 +381,9 @@ export class CombatSystem {
       r.y += r.vy * dt;
       if (r.y <= r.baseY + 0.06) {
         r.y = r.baseY + 0.06;
-        if (r.vy < -1.5) r.vy = -r.vy * 0.28; else r.vy = 0;
+        // One soft bounce, then the body stays down.
+        if (r.vy < -1.5) r.vy = -r.vy * 0.28;
+        else r.vy = 0;
         r.vx *= 0.55;
         r.vz *= 0.55;
       }
@@ -394,10 +404,12 @@ export class CombatSystem {
     if (this.meleeTimer > 0 || player.vehicle || player.deadTimer > 0) return false;
     this.meleeTimer = COMBAT_CFG.punchCooldown;
     player.punchTimer = 0.28;
+    // Forward vector on the ground plane, matching the player's heading convention.
     const fx = Math.sin(player.heading);
     const fz = Math.cos(player.heading);
     let best = null;
     let bestD = COMBAT_CFG.punchRange;
+    // A candidate only counts if it is inside the range and roughly ahead (cos > 0.5, a ~60° cone).
     const consider = (t) => {
       if (!t.alive) return;
       const dx = t.pos.x - player.pos.x;
@@ -431,6 +443,7 @@ export class CombatSystem {
     player.addShake(0.08);
     if (audio && audio.playPunch) audio.playPunch();
     if (pedHit === best && this.peds.knockDown) {
+      // Civilians go down instead of taking lethal damage.
       this.peds.knockDown(best, _tmpDir);
       this.hitMarker = COMBAT_CFG.hitMarkerTime;
       this.hitMarkerKill = !best.alive;
@@ -449,6 +462,7 @@ export class CombatSystem {
   }
 
   updateLunge(dt, player) {
+    // Driving or an already-finished dash cancels any pending lunge.
     if (this.lungeTime <= 0 || player.vehicle) {
       this.lungeTime = 0;
       return;
@@ -457,6 +471,7 @@ export class CombatSystem {
     this.lungeTime -= step;
     player.pos.x += this.lungeDir.x * step;
     player.pos.z += this.lungeDir.z * step;
+    // Do not let the dash push the player through a wall.
     if (this.city.resolveCircleCollisions) this.city.resolveCircleCollisions(player.pos, 0.48);
   }
 
@@ -467,6 +482,7 @@ export class CombatSystem {
       this.punch(player, targets, police, audio);
       return;
     }
+    // Rate of fire gate shared by every shot path.
     if (this.fireTimer > 0) return;
 
     const st = player.getCurrentWeaponState();
@@ -498,6 +514,7 @@ export class CombatSystem {
     const spread = spec.spread + this.bloom;
     this.bloom = Math.min(COMBAT_CFG.maxBloom, this.bloom + (spec.bloomPerShot || 0.006));
 
+    // The muzzle sits just in front of and to the right of the chest.
     const muzzlePos = new THREE.Vector3(
       player.pos.x + Math.sin(player.heading) * 0.72 + Math.cos(player.heading) * 0.26,
       player.pos.y + 1.38,
@@ -527,10 +544,12 @@ export class CombatSystem {
       const dmg = this.damageAt(spec, res.dist) * mult * this.difficulty.playerDamage;
       this.applyHit(res.hitTarget, dmg, aimDir, player, police, { headshot: res.headshot, weapon: spec.id });
     } else {
+      // A high hit on a building may pop glass; either way, shots near cops draw attention.
       if (res.hitWorld && res.hitPos.y > 1.2 && audio && this.rng.chance(0.25)) audio.playGlassBreak(0.5);
       if (police && police.isCopNearby(player.pos, 75)) police.reportCrime('weapon_fire', player.pos, 0.8);
     }
 
+    // Firing the last round starts the reload immediately.
     if (st.mag === 0) this.reloadWeapon(player, audio);
   }
 
@@ -539,6 +558,7 @@ export class CombatSystem {
     if (spec.melee) return;
     const st = player.getCurrentWeaponState();
     const need = spec.magSize - st.mag;
+    // Never load more rounds than the reserve actually holds.
     const take = Math.min(need, st.reserve);
     if (take <= 0) return;
     st.mag += take;
@@ -563,6 +583,7 @@ export class CombatSystem {
     const hitChance = COMBAT_CFG.npcBaseAccuracy * this.difficulty.npcAccuracy * clamp(1.35 - dist / 55, 0.25, 1.2) * clamp(1.15 - playerSpeed / 40, 0.4, 1.1);
     const hits = forceHit !== null ? forceHit : this.rng.chance(hitChance);
     if (!hits) {
+      // A miss is still a tracer: scatter the direction around the target.
       dir.x += this.rng.range(-0.14, 0.14);
       dir.y += this.rng.range(-0.07, 0.08);
       dir.z += this.rng.range(-0.14, 0.14);
@@ -588,12 +609,14 @@ export class CombatSystem {
     if (this.meleeTimer > 0) this.meleeTimer -= dt;
     if (this.hitMarker > 0) this.hitMarker = Math.max(0, this.hitMarker - dt);
     if (this.damageFlash > 0) this.damageFlash = Math.max(0, this.damageFlash - dt * 2.4);
+    // Spread recovers only once the trigger is released.
     if (!controls.fire) this.bloom = Math.max(0, this.bloom - dt * COMBAT_CFG.bloomRecover);
 
     // Pay the recoil kick back to the camera: fast at first, easing out (exponential decay).
     if (this.recoilDebt > 1e-5) {
       const pay = Math.min(this.recoilDebt, this.recoilDebt * (1 - Math.exp(-COMBAT_CFG.recoilRecovery * dt)) + 0.0004);
       this.recoilDebt -= pay;
+      // While the trigger is held the kick is not returned, so sustained fire climbs.
       if (!controls.fire || this.fireTimer > 0) player.camPitch = Math.min(1.2, player.camPitch + pay);
     } else {
       this.recoilDebt = 0;
@@ -610,6 +633,7 @@ export class CombatSystem {
     const landed = this.casings.update(dt);
     if (landed > 0 && audio && audio.playShellCasing) audio.playShellCasing();
 
+    // Switching weapons clears the bloom and costs a beat before the next shot.
     if (player.weaponIndex !== this.lastWeaponIndex) {
       if (this.lastWeaponIndex >= 0 && audio && audio.playWeaponSwitch) audio.playWeaponSwitch();
       this.lastWeaponIndex = player.weaponIndex;
@@ -623,6 +647,7 @@ export class CombatSystem {
 
     this.updateRagdolls(dt);
 
+    // Fade and retire the short-lived visual effects (tracers, flashes, sparks).
     const decayList = (arr) => {
       for (let i = arr.length - 1; i >= 0; i--) {
         const it = arr[i];

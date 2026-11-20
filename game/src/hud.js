@@ -79,7 +79,7 @@ export class HudOverlay {
   // Push a notification. kind: 'info' | 'warn' | 'cash'. Duration in seconds of sim time.
   notify(text, kind = 'info', duration = 3.5) {
     if (!this.notifyStack) return;
-    // Validate text and duration to prevent invalid notifications.
+    // Anything that is not a non-empty string would render as "undefined" in the stack.
     if (!text || typeof text !== 'string') return;
     const safeDuration = Math.max(0.1, Math.min(60, Number(duration) || 3.5));
     // Collapse exact repeats into the existing entry instead of stacking copies.
@@ -93,6 +93,7 @@ export class HudOverlay {
     el.textContent = text;
     this.notifyStack.appendChild(el);
     this.notifications.push({ el, text, until: this.lastTime + safeDuration, fading: false, removeAt: 0 });
+    // The stack never grows past five entries; the oldest is dropped first.
     while (this.notifications.length > 5) this._dropNotification(this.notifications[0], true);
   }
 
@@ -105,6 +106,7 @@ export class HudOverlay {
   }
 
   updateNotifications(time) {
+    // Iterate over a copy: _dropNotification splices the live array.
     for (const n of this.notifications.slice()) {
       if (!n.fading && time >= n.until) {
         n.fading = true;
@@ -153,6 +155,7 @@ export class HudOverlay {
     const circumference = 69.115;
     const r = Math.max(0, Math.min(1, remaining));
     this.wantedRingArc.setAttribute('stroke-dashoffset', (circumference * (1 - r)).toFixed(2));
+    // Red while the player is in plain sight, blue as the heat cools, green when nearly free.
     this.wantedRingArc.setAttribute('stroke', r > 0.99 ? '#ff4558' : r > 0.33 ? '#46b5ff' : '#5ef2a5');
   }
 
@@ -234,7 +237,7 @@ export class HudOverlay {
       ctx.stroke();
       if (v % 40 === 0) ctx.fillText(String(v), cx + cos * (r - 24), cy + sin * (r - 24));
     }
-    // Needle with critically damped follow so it never jitters with gear changes.
+    // Needle with a critically damped follow so it never jitters with gear changes.
     const target = a0 + (a1 - a0) * Math.max(0, Math.min(1, mph / maxMph));
     if (this.needleAngle === 0) this.needleAngle = a0;
     this.needleAngle += (target - this.needleAngle) * (1 - Math.exp(-14 * dt));
@@ -265,7 +268,8 @@ export class HudOverlay {
       const row = document.createElement('div');
       row.className = e.state === 'passed' ? 'done' : e.state === 'failed' ? 'failed' : e.state === 'active' ? '' : 'pending';
       const mark = e.state === 'passed' ? '✓' : e.state === 'failed' ? '✗' : e.state === 'active' ? '▶' : '·';
-      row.textContent = `${mark} ${e.title}${e.state === 'passed' && e.reward ? `  +$${e.reward.toLocaleString('en-US')}` : ''}`;
+      const reward = e.state === 'passed' && e.reward ? `  +$${e.reward.toLocaleString('en-US')}` : '';
+      row.textContent = `${mark} ${e.title}${reward}`;
       this.missionLogList.appendChild(row);
     }
   }
@@ -385,8 +389,8 @@ export class HudOverlay {
     // West Annex: its blocks, short N-S streets and the staggered E-W streets.
     if (city.annex) {
       const a = city.annex;
-      ctx.fillStyle = '#2c3348';
       const size = CITY.blockSize * scale;
+      ctx.fillStyle = '#2c3348';
       for (const bx of a.blockX) {
         for (const bz of a.blockZ) ctx.fillRect(toMapX(bx - CITY.blockSize * 0.5), toMapY(bz - CITY.blockSize * 0.5), size, size);
       }
@@ -416,14 +420,14 @@ export class HudOverlay {
     ctx.lineWidth = 2;
     ctx.strokeRect(toMapX(CITY.garagePos.x) - 4, toMapY(CITY.garagePos.z) - 4, 8, 8);
 
-    // Pickups (health / armour / cash) from the mission system.
+    // Pickups (health / armour / cash) from the mission system, drawn as small diamonds.
     if (missions && missions.pickups) {
       for (const pk of missions.pickups) {
         if (pk.taken) continue;
         ctx.fillStyle = pk.kind === 'health' ? '#4ce88b' : pk.kind === 'armour' ? '#2fb8ff' : '#ffd84d';
-        ctx.beginPath();
         const ux = toMapX(pk.x);
         const uz = toMapY(pk.z);
+        ctx.beginPath();
         ctx.moveTo(ux, uz - 4);
         ctx.lineTo(ux + 4, uz);
         ctx.lineTo(ux, uz + 4);
@@ -452,7 +456,7 @@ export class HudOverlay {
       ctx.fillRect(vx - 1.5, vz - 1.5, 3, 3);
     }
 
-    // Mission objective / fixer blip
+    // Mission objective / fixer blip, clamped to the rim of the dial when off-screen.
     if (missions && missions.objectivePos) {
       const mx = toMapX(missions.objectivePos.x);
       const mz = toMapY(missions.objectivePos.z);
@@ -540,6 +544,7 @@ export class HudOverlay {
   }
 
   update(time, city, player, police, missions, vehicles, combat) {
+    // Clamp dt so a long tab-away hitch never makes the animated widgets jump.
     const dt = Math.max(0, Math.min(0.25, time - this.lastTime));
     this.lastTime = time;
     // Wanted stars with red/blue strobe when active (steady red when reduced motion is on)
@@ -554,6 +559,7 @@ export class HudOverlay {
       }
     }
     if (stars !== this.lastStars) {
+      // Crossing three stars raises the first roadblock; dropping to zero clears the chase.
       if (stars > this.lastStars && stars >= 3 && this.lastStars < 3) this.notify('Roadblocks are going up', 'warn', 3);
       else if (stars === 0 && this.lastStars > 0) this.notify('You lost the cops', 'info', 2.5);
       this.lastStars = stars;
@@ -624,7 +630,8 @@ export class HudOverlay {
       this.speedoVal.textContent = String(mph);
       this.speedoGear.textContent = String(gear);
       this.speedoRpm.style.width = `${Math.round(rpm)}%`;
-      const maxMph = Math.max(80, Math.ceil(((player.vehicle.spec && player.vehicle.spec.maxSpeed) || 40) * 2.237 / 20) * 20);
+      const topSpeed = (player.vehicle.spec && player.vehicle.spec.maxSpeed) || 40;
+      const maxMph = Math.max(80, Math.ceil((topSpeed * 2.237) / 20) * 20);
       this.drawSpeedoDial(dt, mph, maxMph, gear, rpm);
       this.crosshair.classList.remove('active');
     } else {

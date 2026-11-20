@@ -1,5 +1,12 @@
+// Central tuning table for Vice Meridian. Every module reads its numbers from here so the
+// simulation, the renderer and the HUD all agree on one source of truth. Tables exported from
+// this file are deep-frozen at the bottom, so treat them as read-only constants.
+
+// Fixed simulation step. main.js accumulates real time and steps this size.
 export const FIXED_DT = 1 / 60;
 
+// City layout. `pitch` is the distance from one block's start to the next; the grid is square,
+// so halfSpanX and halfSpanZ are the same number, kept separate for readability at call sites.
 export const CITY = {
   gridCols: 6,
   gridRows: 6,
@@ -160,6 +167,7 @@ export const PALETTE = {
   ],
 };
 
+// Named neighbourhoods used by the HUD district readout and the minimap label.
 export const DISTRICTS = [
   { name: 'PALMETTO STRIP', minX: 80, maxX: 240, minZ: -240, maxZ: 70 },
   { name: 'MARISOL BAY', minX: 200, maxX: 480, minZ: -320, maxZ: 320 },
@@ -168,6 +176,8 @@ export const DISTRICTS = [
   { name: 'OLD MERIDIAN', minX: -240, maxX: 80, minZ: -10, maxZ: 95 },
 ];
 
+// One entry per drivable traffic class. Lengths/widths drive both the mesh builder and the
+// collision footprint, so keep them in step with what vehicles.js assembles.
 export const VEHICLE_SPECS = {
   sports: {
     id: 'sports',
@@ -299,6 +309,7 @@ export const VEHICLE_SPECS = {
   },
 };
 
+// Player loadout. Order matters: hotkey 1 is fists, 2 the pistol, 3 the SMG.
 export const WEAPONS = [
   {
     id: 'pistol',
@@ -405,6 +416,8 @@ export const POLICE_CFG = {
   patrolSpeed: 11,
 };
 
+// Human-readable district for the HUD. The West Annex and the pier sit outside every named
+// rectangle, so they are tested first.
 export function getDistrictName(x, z) {
   if (x < -CITY.halfSpanX - 8) return 'WEST ANNEX';
   if (x > CITY.waterStartX - 4 && Math.abs(z - CITY.pierZ) < 5) return 'MERIDIAN PIER';
@@ -443,7 +456,8 @@ export function sampleTimeOfDay(t) {
   };
 }
 
-// Weighted vehicle class picker for ambient traffic.
+// Weighted vehicle class picker for ambient traffic. Zero-weight classes (police) never show up
+// in the ambient fleet; they are spawned explicitly by the police manager.
 export function pickTrafficClass(rng) {
   const entries = Object.entries(TRAFFIC_CFG.classWeights).filter(([, w]) => w > 0);
   const total = entries.reduce((s, [, w]) => s + w, 0);
@@ -506,6 +520,8 @@ export const COLOR_RAMPS = {
   ],
 };
 
+// Sample a colour ramp at t (0..1), wrapping t around the hour cycle. Returns a packed hex
+// colour and the interpolated intensity.
 export function sampleRamp(ramp, t) {
   const tt = ((t % 1) + 1) % 1;
   for (let i = 0; i < ramp.length - 1; i++) {
@@ -515,7 +531,10 @@ export function sampleRamp(ramp, t) {
       const k = b.t > a.t ? (tt - a.t) / (b.t - a.t) : 0;
       const ch = (c, s) => (c >> s) & 255;
       const mixCh = (s) => Math.round(ch(a.color, s) * (1 - k) + ch(b.color, s) * k);
-      return { color: (mixCh(16) << 16) | (mixCh(8) << 8) | mixCh(0), intensity: a.intensity + (b.intensity - a.intensity) * k };
+      return {
+        color: (mixCh(16) << 16) | (mixCh(8) << 8) | mixCh(0),
+        intensity: a.intensity + (b.intensity - a.intensity) * k,
+      };
     }
   }
   const last = ramp[ramp.length - 1];
@@ -550,7 +569,8 @@ export const FRAME_BUDGET = {
   smoothing: 0.08,
 };
 
-// Validate frame budget thresholds to ensure upshift threshold is always lower than downshift.
+// A tier can only ever climb if the upshift threshold sits strictly below the downshift one;
+// catching a bad edit here beats a guard that oscillates every frame.
 if (FRAME_BUDGET.upshiftMs >= FRAME_BUDGET.downshiftMs) {
   throw new Error('FRAME_BUDGET.upshiftMs must be less than downshiftMs');
 }
@@ -571,7 +591,7 @@ export const AUDIO_CFG = {
 
 // Validate that a weapon configuration has required fields and sane values.
 export function validateWeapon(weapon) {
-  if (!weapon.id || !weapon.name) return false;
+  if (!weapon || !weapon.id || !weapon.name) return false;
   if (typeof weapon.damage !== 'number' || weapon.damage <= 0) return false;
   if (!weapon.melee && (typeof weapon.range !== 'number' || weapon.range <= 0)) return false;
   return true;
@@ -589,6 +609,8 @@ export function deepFreeze(obj, seen = new Set()) {
   return Object.freeze(obj);
 }
 
+// Every tunable table is read-only from here on. Functions and primitives are untouched, and
+// freezing an already-frozen table is a no-op, so repeated imports stay cheap.
 for (const table of [
   CITY, TIME_OF_DAY, TRAFFIC_CFG, PED_CFG, COMBAT_CFG, DIFFICULTY, CITY_GEN, WANTED_CFG, SAVE_CFG, PALETTE,
   DISTRICTS, VEHICLE_SPECS, WEAPONS, PLAYER_CFG, POLICE_CFG, WANTED_LEVELS, POLICE_BUDGET, COLOR_RAMPS,

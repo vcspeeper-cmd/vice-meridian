@@ -7,17 +7,22 @@
 
 // ADSR envelope on an AudioParam. Times are seconds; `sustain` is a fraction of `peak`.
 // Returns the time at which the release has finished, so callers can stop their sources there.
-export function applyEnvelope(param, start, { attack = 0.01, decay = 0.08, sustain = 0.6, hold = 0.1, release = 0.2, peak = 1, floor = 0.0001 } = {}) {
+export function applyEnvelope(
+  param,
+  start,
+  { attack = 0.01, decay = 0.08, sustain = 0.6, hold = 0.1, release = 0.2, peak = 1, floor = 0.0001 } = {},
+) {
   const a = Math.max(0.001, attack);
   const d = Math.max(0.001, decay);
+  const h = Math.max(0, hold);
   const r = Math.max(0.005, release);
   const sus = Math.max(floor, peak * sustain);
   param.cancelScheduledValues(start);
   param.setValueAtTime(floor, start);
   param.linearRampToValueAtTime(peak, start + a);
   param.exponentialRampToValueAtTime(sus, start + a + d);
-  param.setValueAtTime(sus, start + a + d + Math.max(0, hold));
-  const end = start + a + d + Math.max(0, hold) + r;
+  param.setValueAtTime(sus, start + a + d + h);
+  const end = start + a + d + h + r;
   param.exponentialRampToValueAtTime(floor, end);
   return end;
 }
@@ -56,12 +61,12 @@ export function createNoiseBuffer(ctx, seconds = 1, colour = 'white', seed = 482
 // [{ type: 'highpass', freq: 200 }, { type: 'peaking', freq: 1200, gain: 6, q: 2 }].
 // Returns { input, output, filters } so a voice connects to `input` and `output` feeds a bus.
 export function createFilterChain(ctx, stages) {
-  const filters = stages.map((st) => {
+  const filters = stages.map((stage) => {
     const f = ctx.createBiquadFilter();
-    f.type = st.type || 'lowpass';
-    f.frequency.value = st.freq ?? 1000;
-    f.Q.value = st.q ?? 0.707;
-    if (st.gain !== undefined) f.gain.value = st.gain;
+    f.type = stage.type || 'lowpass';
+    f.frequency.value = stage.freq ?? 1000;
+    f.Q.value = stage.q ?? 0.707;
+    if (stage.gain !== undefined) f.gain.value = stage.gain;
     return f;
   });
   for (let i = 0; i < filters.length - 1; i++) filters[i].connect(filters[i + 1]);
@@ -160,23 +165,24 @@ export class PatternScheduler {
 
   tick() {
     const horizon = this.ctx.currentTime + this.lookahead;
-    for (const [id, tr] of this.tracks) {
-      const p = tr.pattern;
-      const stepDur = 60 / (p.bpm || 120) / (p.stepsPerBeat || 4);
-      while (tr.nextTime < horizon) {
-        const note = p.steps[tr.step];
-        if (note !== null && note !== undefined) p.voice(tr.nextTime, note, tr.step, stepDur);
-        tr.step += 1;
-        tr.nextTime += stepDur;
-        if (tr.step >= p.steps.length) {
-          if (p.loop) tr.step = 0;
-          else {
-            tr.done = true;
+    for (const [id, track] of this.tracks) {
+      const pattern = track.pattern;
+      const stepDur = 60 / (pattern.bpm || 120) / (pattern.stepsPerBeat || 4);
+      while (track.nextTime < horizon) {
+        const note = pattern.steps[track.step];
+        if (note !== null && note !== undefined) pattern.voice(track.nextTime, note, track.step, stepDur);
+        track.step += 1;
+        track.nextTime += stepDur;
+        if (track.step >= pattern.steps.length) {
+          if (pattern.loop) {
+            track.step = 0;
+          } else {
+            track.done = true;
             break;
           }
         }
       }
-      if (tr.done) this.tracks.delete(id);
+      if (track.done) this.tracks.delete(id);
     }
   }
 }
@@ -185,9 +191,27 @@ const midiToHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
 // Three in-car radio stations, each a short looping groove written as MIDI step patterns.
 export const RADIO_STATIONS = [
-  { name: 'WAVE 104 · SYNTH', bpm: 108, bass: [36, null, 36, null, 43, null, 41, null, 36, null, 36, 38, 39, null, 41, null], lead: [72, null, null, 75, null, 79, null, null, 77, null, 75, null, 72, null, null, null], wave: 'sawtooth' },
-  { name: 'PALMETTO FM · FUNK', bpm: 96, bass: [33, null, 33, 45, null, 33, 43, null, 31, null, 31, 43, null, 31, 41, 43], lead: [null, 69, null, 72, null, null, 74, null, null, 69, null, 72, null, 76, null, null], wave: 'square' },
-  { name: 'DOCKSIDE 88 · DUB', bpm: 76, bass: [31, null, null, null, 31, null, 34, null, 36, null, null, null, 34, null, 31, null], lead: [null, null, 67, null, null, null, 70, null, null, null, 72, null, null, null, 70, null], wave: 'triangle' },
+  {
+    name: 'WAVE 104 · SYNTH',
+    bpm: 108,
+    bass: [36, null, 36, null, 43, null, 41, null, 36, null, 36, 38, 39, null, 41, null],
+    lead: [72, null, null, 75, null, 79, null, null, 77, null, 75, null, 72, null, null, null],
+    wave: 'sawtooth',
+  },
+  {
+    name: 'PALMETTO FM · FUNK',
+    bpm: 96,
+    bass: [33, null, 33, 45, null, 33, 43, null, 31, null, 31, 43, null, 31, 41, 43],
+    lead: [null, 69, null, 72, null, null, 74, null, null, 69, null, 72, null, 76, null, null],
+    wave: 'square',
+  },
+  {
+    name: 'DOCKSIDE 88 · DUB',
+    bpm: 76,
+    bass: [31, null, null, null, 31, null, 34, null, 36, null, null, null, 34, null, 31, null],
+    lead: [null, null, 67, null, null, null, 70, null, null, null, 72, null, null, null, 70, null],
+    wave: 'triangle',
+  },
 ];
 
 export class AudioEngine {
@@ -201,6 +225,7 @@ export class AudioEngine {
     this.engineSub = null;
     this.engineGain = null;
     this.engineFilter = null;
+    this.rumbleGain = null;
     this.sirenOsc = null;
     this.sirenGain = null;
     this.ambienceGain = null;
@@ -268,11 +293,15 @@ export class AudioEngine {
       this.engineFilter.connect(this.engineGain).connect(this.mixer.bus('vehicle'));
       this.engineOsc.start();
       this.engineSub.start();
+
       // Brown-noise rumble under the oscillators gives the idle its mechanical grit.
       const rumble = this.ctx.createBufferSource();
       rumble.buffer = this.brownBuffer;
       rumble.loop = true;
-      const rumbleChain = createFilterChain(this.ctx, [{ type: 'lowpass', freq: 180 }, { type: 'peaking', freq: 70, gain: 6, q: 1.4 }]);
+      const rumbleChain = createFilterChain(this.ctx, [
+        { type: 'lowpass', freq: 180 },
+        { type: 'peaking', freq: 70, gain: 6, q: 1.4 },
+      ]);
       this.rumbleGain = this.ctx.createGain();
       this.rumbleGain.gain.value = 0;
       rumble.connect(rumbleChain.input);
@@ -336,10 +365,6 @@ export class AudioEngine {
   setVolume(v) {
     this.volume = Math.max(0, Math.min(1, v));
     if (this.mixer) this.mixer.setVolume(this.volume);
-    // Ensure mixer state stays in sync with engine's tracked volume.
-    if (this.mixer && Math.abs(this.mixer.volume - this.volume) > 0.01) {
-      this.mixer.setVolume(this.volume);
-    }
   }
 
   setSirenActive(active, distance = 40) {
@@ -370,6 +395,7 @@ export class AudioEngine {
       this.engineGain.gain.setTargetAtTime(0.045 + Math.min(0.05, spd * 0.0012), now, 0.08);
       // Idle rumble is loudest at standstill and fades as the oscillators take over.
       this.rumbleGain.gain.setTargetAtTime(0.12 * (1 - ratio) + 0.03, now, 0.1);
+
       // A throttle stab from low revs triggers a short rev blip.
       const throttle = v.throttleInput !== undefined ? Math.abs(v.throttleInput) : ratio;
       this.revCooldown = Math.max(0, this.revCooldown - dt);
@@ -418,7 +444,9 @@ export class AudioEngine {
 
     // Cash going up plays the register chime; a sudden health drop plays a dull body hit.
     if (player.money !== undefined) {
-      if (this.lastMoney !== null && player.money > this.lastMoney + 0.5) this.playCashPickup(Math.min(3, (player.money - this.lastMoney) / 250));
+      if (this.lastMoney !== null && player.money > this.lastMoney + 0.5) {
+        this.playCashPickup(Math.min(3, (player.money - this.lastMoney) / 250));
+      }
       this.lastMoney = player.money;
     }
     if (player.health !== undefined) {
@@ -487,7 +515,8 @@ export class AudioEngine {
   playMissionChime() {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    [523.25, 659.25, 783.99].forEach((freq, i) => this._tone(now + i * 0.1, 0.28, 'triangle', freq, 0.09));
+    const notes = [523.25, 659.25, 783.99];
+    notes.forEach((freq, i) => this._tone(now + i * 0.1, 0.28, 'triangle', freq, 0.09));
   }
 
   // Short brass-ish fanfare: arpeggio up, then a held major chord.
@@ -500,14 +529,16 @@ export class AudioEngine {
       this._tone(now + i * 0.09, 0.24, 'triangle', f, 0.06);
     });
     const chordAt = now + seq.length * 0.09;
-    [523.25, 659.25, 783.99].forEach((f) => this._tone(chordAt, 0.9, 'sawtooth', f, 0.025));
+    const chord = [523.25, 659.25, 783.99];
+    chord.forEach((f) => this._tone(chordAt, 0.9, 'sawtooth', f, 0.025));
     this._tone(chordAt, 0.9, 'triangle', 261.63, 0.08);
   }
 
   playMissionFailed() {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    [392.0, 369.99, 311.13].forEach((f, i) => this._tone(now + i * 0.22, 0.38, 'sawtooth', f, 0.04, f * 0.97));
+    const falling = [392.0, 369.99, 311.13];
+    falling.forEach((f, i) => this._tone(now + i * 0.22, 0.38, 'sawtooth', f, 0.04, f * 0.97));
     this._tone(now + 0.66, 0.8, 'triangle', 155.56, 0.08, 140);
   }
 
@@ -546,9 +577,9 @@ export class AudioEngine {
   playTyreScreech(intensity = 1) {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    const f = this._noiseShot(now, 0.45, 'bandpass', 2600, 0.08 * intensity, 12);
-    f.frequency.setValueAtTime(2600, now);
-    f.frequency.linearRampToValueAtTime(1900, now + 0.45);
+    const filter = this._noiseShot(now, 0.45, 'bandpass', 2600, 0.08 * intensity, 12);
+    filter.frequency.setValueAtTime(2600, now);
+    filter.frequency.linearRampToValueAtTime(1900, now + 0.45);
   }
 
   // Police-radio chirp: squelch burst plus two quick beeps.
@@ -577,8 +608,8 @@ export class AudioEngine {
   playWhoosh() {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    const f = this._noiseShot(now, 0.16, 'bandpass', 600, 0.05, 3);
-    f.frequency.linearRampToValueAtTime(1800, now + 0.16);
+    const filter = this._noiseShot(now, 0.16, 'bandpass', 600, 0.05, 3);
+    filter.frequency.linearRampToValueAtTime(1800, now + 0.16);
   }
 
   // Glass shatter: a cluster of short high-Q pings over a bright noise burst.
@@ -669,34 +700,67 @@ export class AudioEngine {
     this._voice(now, { type: 'sine', freq: 1975.5, env: bell, bus: 'ui' });
     this._voice(now + 0.07, { type: 'sine', freq: 2637, env: bell, bus: 'ui' });
     if (amount > 1.5) this._voice(now + 0.14, { type: 'sine', freq: 3136, env: bell, bus: 'ui' });
-    this._noiseVoice(now, { env: { attack: 0.002, decay: 0.05, sustain: 0.1, hold: 0, release: 0.05, peak: 0.04 }, filters: [{ type: 'highpass', freq: 5000 }], bus: 'ui' });
+    this._noiseVoice(now, {
+      env: { attack: 0.002, decay: 0.05, sustain: 0.1, hold: 0, release: 0.05, peak: 0.04 },
+      filters: [{ type: 'highpass', freq: 5000 }],
+      bus: 'ui',
+    });
   }
 
   // Dull body hit when the player is wounded.
   playBodyHit() {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    this._voice(now, { type: 'sine', freq: 90, endFreq: 42, glide: 0.12, env: { attack: 0.004, decay: 0.08, sustain: 0.2, hold: 0, release: 0.1, peak: 0.16 } });
-    this._noiseVoice(now, { buffer: this.brownBuffer, env: { attack: 0.002, decay: 0.06, sustain: 0.2, hold: 0, release: 0.08, peak: 0.2 }, filters: [{ type: 'lowpass', freq: 400 }] });
+    this._voice(now, {
+      type: 'sine',
+      freq: 90,
+      endFreq: 42,
+      glide: 0.12,
+      env: { attack: 0.004, decay: 0.08, sustain: 0.2, hold: 0, release: 0.1, peak: 0.16 },
+    });
+    this._noiseVoice(now, {
+      buffer: this.brownBuffer,
+      env: { attack: 0.002, decay: 0.06, sustain: 0.2, hold: 0, release: 0.08, peak: 0.2 },
+      filters: [{ type: 'lowpass', freq: 400 }],
+    });
   }
 
   // UI hover: a soft high tick. UI click: a two-layer confirm blip.
   playUiHover() {
     if (!this.ready) return;
-    this._voice(this.ctx.currentTime, { type: 'triangle', freq: 1760, env: { attack: 0.002, decay: 0.03, sustain: 0.1, hold: 0, release: 0.04, peak: 0.025 }, bus: 'ui' });
+    this._voice(this.ctx.currentTime, {
+      type: 'triangle',
+      freq: 1760,
+      env: { attack: 0.002, decay: 0.03, sustain: 0.1, hold: 0, release: 0.04, peak: 0.025 },
+      bus: 'ui',
+    });
   }
 
   playUiClick() {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    this._voice(now, { type: 'square', freq: 880, env: { attack: 0.002, decay: 0.04, sustain: 0.2, hold: 0, release: 0.05, peak: 0.03 }, filters: [{ type: 'lowpass', freq: 3000 }], bus: 'ui' });
-    this._voice(now + 0.045, { type: 'triangle', freq: 1320, env: { attack: 0.002, decay: 0.05, sustain: 0.2, hold: 0, release: 0.08, peak: 0.04 }, bus: 'ui' });
+    this._voice(now, {
+      type: 'square',
+      freq: 880,
+      env: { attack: 0.002, decay: 0.04, sustain: 0.2, hold: 0, release: 0.05, peak: 0.03 },
+      filters: [{ type: 'lowpass', freq: 3000 }],
+      bus: 'ui',
+    });
+    this._voice(now + 0.045, {
+      type: 'triangle',
+      freq: 1320,
+      env: { attack: 0.002, decay: 0.05, sustain: 0.2, hold: 0, release: 0.08, peak: 0.04 },
+      bus: 'ui',
+    });
   }
 
   // Dry-fire click when the magazine is empty.
   playReloadClick() {
     if (!this.ready) return;
-    this._noiseVoice(this.ctx.currentTime, { env: { attack: 0.001, decay: 0.015, sustain: 0.1, hold: 0, release: 0.02, peak: 0.12 }, filters: [{ type: 'bandpass', freq: 3200, q: 6 }] });
+    this._noiseVoice(this.ctx.currentTime, {
+      env: { attack: 0.001, decay: 0.015, sustain: 0.1, hold: 0, release: 0.02, peak: 0.12 },
+      filters: [{ type: 'bandpass', freq: 3200, q: 6 }],
+    });
   }
 
   // Brass casing bouncing on asphalt: three decaying metallic pings.
@@ -705,7 +769,11 @@ export class AudioEngine {
     const now = this.ctx.currentTime;
     for (let i = 0; i < 3; i++) {
       const t = now + 0.18 + i * (0.09 - i * 0.02);
-      this._voice(t, { type: 'sine', freq: 5200 - i * 300, env: { attack: 0.001, decay: 0.02, sustain: 0.2, hold: 0, release: 0.05, peak: 0.018 / (i + 1) } });
+      this._voice(t, {
+        type: 'sine',
+        freq: 5200 - i * 300,
+        env: { attack: 0.001, decay: 0.02, sustain: 0.2, hold: 0, release: 0.05, peak: 0.018 / (i + 1) },
+      });
     }
   }
 
@@ -715,7 +783,15 @@ export class AudioEngine {
     const now = this.ctx.currentTime;
     for (let i = 0; i < 4; i++) {
       const t = now + i * 0.16;
-      this._voice(t, { type: 'sawtooth', freq: 700, endFreq: 1500, glide: 0.08, env: { attack: 0.005, decay: 0.05, sustain: 0.7, hold: 0.04, release: 0.05, peak: 0.03 }, filters: [{ type: 'lowpass', freq: 2600 }], bus: 'vehicle' });
+      this._voice(t, {
+        type: 'sawtooth',
+        freq: 700,
+        endFreq: 1500,
+        glide: 0.08,
+        env: { attack: 0.005, decay: 0.05, sustain: 0.7, hold: 0.04, release: 0.05, peak: 0.03 },
+        filters: [{ type: 'lowpass', freq: 2600 }],
+        bus: 'vehicle',
+      });
     }
   }
 
@@ -736,15 +812,39 @@ export class AudioEngine {
     this.radioIndex = index >= 0 && index < RADIO_STATIONS.length ? index : -1;
     this.playRadioBlip();
     if (this.radioIndex < 0) return;
-    const st = RADIO_STATIONS[this.radioIndex];
+
+    const station = RADIO_STATIONS[this.radioIndex];
     const bassVoice = (time, note, _step, dur) => {
-      this._voice(time, { type: 'square', freq: midiToHz(note), env: { attack: 0.005, decay: dur * 0.6, sustain: 0.4, hold: 0, release: dur * 0.5, peak: 0.06 }, filters: [{ type: 'lowpass', freq: 420, q: 4 }], bus: 'music' });
+      this._voice(time, {
+        type: 'square',
+        freq: midiToHz(note),
+        env: { attack: 0.005, decay: dur * 0.6, sustain: 0.4, hold: 0, release: dur * 0.5, peak: 0.06 },
+        filters: [{ type: 'lowpass', freq: 420, q: 4 }],
+        bus: 'music',
+      });
     };
     const leadVoice = (time, note, _step, dur) => {
-      this._voice(time, { type: st.wave, freq: midiToHz(note), env: { attack: 0.01, decay: dur, sustain: 0.5, hold: dur * 0.5, release: dur * 1.5, peak: 0.025 }, filters: [{ type: 'lowpass', freq: 2400 }, { type: 'peaking', freq: 1200, gain: 4, q: 1 }], bus: 'music' });
+      this._voice(time, {
+        type: station.wave,
+        freq: midiToHz(note),
+        env: { attack: 0.01, decay: dur, sustain: 0.5, hold: dur * 0.5, release: dur * 1.5, peak: 0.025 },
+        filters: [
+          { type: 'lowpass', freq: 2400 },
+          { type: 'peaking', freq: 1200, gain: 4, q: 1 },
+        ],
+        bus: 'music',
+      });
     };
-    this.scheduler.play('radio-bass', { bpm: st.bpm, stepsPerBeat: 4, steps: st.bass, loop: true, voice: bassVoice }, 0.25);
-    this.scheduler.play('radio-lead', { bpm: st.bpm, stepsPerBeat: 4, steps: st.lead, loop: true, voice: leadVoice }, 0.25);
+    this.scheduler.play(
+      'radio-bass',
+      { bpm: station.bpm, stepsPerBeat: 4, steps: station.bass, loop: true, voice: bassVoice },
+      0.25,
+    );
+    this.scheduler.play(
+      'radio-lead',
+      { bpm: station.bpm, stepsPerBeat: 4, steps: station.lead, loop: true, voice: leadVoice },
+      0.25,
+    );
   }
 
   cycleRadio(dir = 1) {
@@ -765,11 +865,13 @@ export class AudioEngine {
   // Wire hover/click sounds onto every button in the front-end menu.
   attachUiSounds(root) {
     if (!root) return;
-    root.addEventListener('pointerover', (e) => {
-      if (e.target && e.target.closest && e.target.closest('button, select, input')) this.playUiHover();
+    root.addEventListener('pointerover', (event) => {
+      const target = event.target;
+      if (target && target.closest && target.closest('button, select, input')) this.playUiHover();
     });
-    root.addEventListener('click', (e) => {
-      if (e.target && e.target.closest && e.target.closest('button, select, input')) this.playUiClick();
+    root.addEventListener('click', (event) => {
+      const target = event.target;
+      if (target && target.closest && target.closest('button, select, input')) this.playUiClick();
     });
   }
 }

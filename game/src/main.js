@@ -52,9 +52,10 @@ export class StateMachine {
   }
 
   can(next) {
-    // Validate that next is a valid state string before checking transitions.
+    // Guard against malformed state names before indexing the transition table.
     if (typeof next !== 'string' || !next) return false;
-    return (this.transitions[this.state] || []).includes(next);
+    const allowed = this.transitions[this.state];
+    return Array.isArray(allowed) ? allowed.includes(next) : false;
   }
 
   // Returns true when the transition happened.
@@ -95,6 +96,7 @@ export class FrameBudgetGuard {
 
   setMode(mode) {
     this.mode = mode;
+    // Pinning to a named tier applies immediately; "auto" leaves the current tier alone.
     if (mode !== 'auto' && QUALITY_TIERS[mode]) this.setTier(mode);
   }
 
@@ -112,6 +114,7 @@ export class FrameBudgetGuard {
     const k = FRAME_BUDGET.smoothing;
     this.smoothedMs += (workMs - this.smoothedMs) * k;
     if (intervalMs > 0) this.fps += (1000 / intervalMs - this.fps) * k;
+    // A pinned quality tier is never adjusted automatically.
     if (this.mode !== 'auto') return;
     const idx = QUALITY_ORDER.indexOf(this.tier);
     if (this.smoothedMs > FRAME_BUDGET.downshiftMs) {
@@ -121,6 +124,7 @@ export class FrameBudgetGuard {
     } else if (this.smoothedMs < FRAME_BUDGET.upshiftMs) {
       this.underFrames++;
       this.overFrames = 0;
+      // Climbing back up needs a longer clean streak than dropping does.
       if (this.underFrames > FRAME_BUDGET.windowFrames * 2 && idx < QUALITY_ORDER.length - 1) this.setTier(QUALITY_ORDER[idx + 1]);
     } else {
       this.overFrames = Math.max(0, this.overFrames - 1);
@@ -132,7 +136,7 @@ export class FrameBudgetGuard {
 function parseParams() {
   const params = new URLSearchParams(window.location.search);
   const rawShot = params.get('shot');
-  // Map legacy starter aliases if ever queried, while natively supporting chase|street|drive|mission|skyline
+  // Legacy starter aliases map onto the native chase|street|drive|mission|skyline shots.
   const aliasMap = { start: 'chase', play: 'drive', end: 'mission' };
   const shot = rawShot ? (aliasMap[rawShot] || rawShot) : null;
   const seed = Number.parseInt(params.get('seed') || '42', 10) || 42;
@@ -160,6 +164,7 @@ function storage() {
   try {
     return window.localStorage || null;
   } catch {
+    // Privacy modes can throw on mere access; treat that as "no storage".
     return null;
   }
 }
@@ -170,6 +175,7 @@ export function validateSave(data) {
   if (data.v !== 1 && data.v !== SAVE_VERSION) return null;
   const p = data.player;
   if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return null;
+  // Reject positions well outside the map so a corrupt save cannot spawn the player in the void.
   if (Math.abs(p.x) > 2000 || Math.abs(p.z) > 2000) return null;
   const wanted = Math.max(0, Math.min(5, Number(data.wanted) | 0));
   const cash = Number.isFinite(data.cash) ? Math.max(0, Math.floor(data.cash)) : Math.max(0, Math.floor(Number(p.money) || 0));
@@ -204,6 +210,7 @@ function writeSave(ctx) {
     ls.setItem(SAVE_CFG.key, JSON.stringify(data));
     return true;
   } catch {
+    // Quota exceeded or storage disabled: the game keeps running unsaved.
     return false;
   }
 }
@@ -274,9 +281,12 @@ async function boot() {
   let shotInfo = null;
   let autosaveTimer = SAVE_CFG.autosaveSeconds;
   let lastStats = null;
+  let muted = false;
 
   const ctx = { city, vehicles, peds, player, police, combat, missions, renderRig, textures };
 
+  // A control snapshot used whenever the simulation runs without live input (shot mode, and the
+  // pause frame). Same shape as InputController#getControls so every consumer can be shared.
   const emptyControls = {
     forward: false,
     backward: false,
@@ -365,7 +375,6 @@ async function boot() {
   }
 
   const machine = new StateMachine(GameState.BOOT, TRANSITIONS, onStateChange);
-  let muted = false;
 
   // --- Settings ---------------------------------------------------------------------------
   const guard = new FrameBudgetGuard((tier) => {
@@ -390,6 +399,9 @@ async function boot() {
     hud.reduceMotion = s.reduceMotion;
     guard.setMode(s.quality);
   }
+
+  // Direction pad for the weapon wheel, accumulated from mouse motion while it is held.
+  const wheelVec = { x: 0, y: 0 };
 
   function handleMetaControls(controls, mouseDelta) {
     if (controls.mute) {
@@ -425,6 +437,7 @@ async function boot() {
         let best = slots[0];
         let bestD = Infinity;
         for (const s of slots) {
+          // Shortest angular distance, wrapped into (-π, π].
           const d = Math.abs(Math.atan2(Math.sin(ang - s.a), Math.cos(ang - s.a)));
           if (d < bestD) {
             bestD = d;
@@ -432,6 +445,7 @@ async function boot() {
           }
         }
         if (player.selectWeapon(best.id)) hud.setWeaponWheel(true, player);
+        // Damp the accumulated vector so holding still does not keep re-selecting.
         wheelVec.x *= 0.5;
         wheelVec.y *= 0.5;
       }
@@ -439,7 +453,6 @@ async function boot() {
       hud.setWeaponWheel(false);
     }
   }
-  const wheelVec = { x: 0, y: 0 };
 
   function stepSimulation(dt, useInput) {
     simTime += dt;
@@ -478,6 +491,7 @@ async function boot() {
       audio.update(dt, player, police);
       if (controls.horn && player.vehicle) {
         audio.playHorn();
+        // A horn blast startles nearby pedestrians much like a distant gunshot would.
         if (peds.alertGunfire) peds.alertGunfire(player.pos, 18);
       }
       if (controls.save) saveNow(true);
@@ -633,6 +647,7 @@ async function boot() {
         stepsThisFrame++;
         if (!SIMULATING.has(machine.state)) break;
       }
+      // Whatever is left after a full catch-up burst is stale; drop it rather than carry it on.
       if (stepsThisFrame >= 6) accumulator = 0;
     } else if (machine.is(GameState.TITLE)) {
       // Gently orbit camera on the title screen over sun-soaked Palmetto Strip
