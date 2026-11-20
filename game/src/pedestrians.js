@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 import { CITY, PED_CFG, TRAFFIC_CFG } from './config.js';
 
+const TAU = Math.PI * 2;
+
 const SHIRT_COLORS = [0xff5d7a, 0x3bd8e0, 0xffb84d, 0xf2e9dc, 0x7a65ff, 0x52e088, 0xff784f, 0x2f3b52];
 const PANTS_COLORS = [0x1f2634, 0x3b485c, 0xcab99c, 0x29323e, 0x5c4a3d];
 const SKIN_TONES = [0xe8bc98, 0xd49b72, 0xb37852, 0x8a5638, 0xf0c9a8];
 
-// Distinct outfit archetypes. `shortSleeves` / `shorts` show skin on arms / lower legs,
-// `hat` adds a brim, `speedScale` lets joggers outpace strollers.
+// Outfit archetypes. `shortSleeves` / `shorts` expose skin on arms / lower legs, `hat` adds a
+// brim, and `speedScale` lets joggers outpace strollers.
 const OUTFITS = [
   { id: 'local', weight: 4, shirts: SHIRT_COLORS, pants: PANTS_COLORS, shortSleeves: false, shorts: false, hat: null, speedScale: 1 },
   { id: 'tourist', weight: 3, shirts: [0xff5d7a, 0xffb84d, 0x3bd8e0, 0x52e088], pants: [0xcab99c, 0xe4d6b8], shortSleeves: true, shorts: true, hat: 0xf2e2b0, speedScale: 0.8 },
@@ -14,15 +16,19 @@ const OUTFITS = [
   { id: 'beach', weight: 2, shirts: [0xffffff, 0xff784f, 0x3bd8e0], pants: [0x2f8fd8, 0xff3b9a, 0xffd84d], shortSleeves: true, shorts: true, hat: null, speedScale: 0.75 },
   { id: 'jogger', weight: 1, shirts: [0x6dff88, 0xff3b9a, 0xffe14d], pants: [0x1f2634], shortSleeves: true, shorts: true, hat: 0x1f2634, speedScale: 2.1 },
 ];
-const OUTFIT_TOTAL = OUTFITS.reduce((s, o) => s + o.weight, 0);
-// Dock workers only appear when a pedestrian is (re)spawned in the industrial district.
+const OUTFIT_TOTAL = OUTFITS.reduce((sum, outfit) => sum + outfit.weight, 0);
+// Dock workers only show up when a pedestrian is (re)spawned inside the industrial district.
 const WORKER_OUTFIT = { id: 'worker', weight: 0, shirts: [0xff8c1a, 0xd8f23a], pants: [0x2c3a52, 0x3b3f46], shortSleeves: false, shorts: false, hat: 0xffd21a, speedScale: 0.95 };
 
-// Spawn ring around the player: pedestrians farther than `despawn` are recycled to a sidewalk
-// point between `inner` and `outer`, preferably behind the player so nobody pops into view.
+// Pedestrians live on a ring around the player: anyone farther out than `despawn` is recycled onto
+// a sidewalk point between `inner` and `outer`, preferably behind the player so nobody pops into
+// view. `recyclePerSecond` caps the churn and `deadLinger` is how long a body may lie there first.
 const RING = { inner: 55, outer: 110, despawn: 150, recyclePerSecond: 5, deadLinger: 12 };
-// Local avoidance: peds closer than `radius` push apart; the grid cell is the neighbour range.
+// Local avoidance: peds closer than `radius` push each other apart, and the grid cell size is the
+// neighbourhood range searched for such pairs.
 const AVOID = { radius: 0.9, cell: 2, strength: 0.5 };
+
+const INSET = 1.6;
 
 export class PedestrianManager {
   constructor(scene, city, rng, count = 88) {
@@ -33,14 +39,14 @@ export class PedestrianManager {
     this.peds = [];
 
     const unitBox = new THREE.BoxGeometry(1, 1, 1);
-    const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    this.torsoInst = new THREE.InstancedMesh(unitBox, mat, count);
-    this.headInst = new THREE.InstancedMesh(unitBox, mat, count);
-    this.legLInst = new THREE.InstancedMesh(unitBox, mat, count);
-    this.legRInst = new THREE.InstancedMesh(unitBox, mat, count);
-    // Arms (both arms share one instance buffer: 2 per ped) and hats.
-    this.armInst = new THREE.InstancedMesh(unitBox, mat, count * 2);
-    this.hatInst = new THREE.InstancedMesh(unitBox, mat, count);
+    const material = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    this.torsoInst = new THREE.InstancedMesh(unitBox, material, count);
+    this.headInst = new THREE.InstancedMesh(unitBox, material, count);
+    this.legLInst = new THREE.InstancedMesh(unitBox, material, count);
+    this.legRInst = new THREE.InstancedMesh(unitBox, material, count);
+    // Both arms of a ped share one instance buffer, hence two slots each; hats get one each.
+    this.armInst = new THREE.InstancedMesh(unitBox, material, count * 2);
+    this.hatInst = new THREE.InstancedMesh(unitBox, material, count);
 
     scene.add(this.torsoInst, this.headInst, this.legLInst, this.legRInst, this.armInst, this.hatInst);
 
@@ -60,10 +66,11 @@ export class PedestrianManager {
   }
 
   setActiveCount(n) {
-    // Clamp to valid range and ensure it doesn't exceed the pool size.
-    const clamped = Math.max(0, Math.min(this.peds.length, n | 0));
+    // Clamp to the valid range and never exceed the pool size.
+    const requested = n | 0;
+    const clamped = Math.max(0, Math.min(this.peds.length, requested));
     this.activeCount = clamped;
-    if (clamped !== (n | 0)) {
+    if (clamped !== requested) {
       console.warn('setActiveCount: clamped from', n, 'to', clamped);
     }
   }
@@ -72,16 +79,20 @@ export class PedestrianManager {
   applyColors(i) {
     const ped = this.peds[i];
     const outfit = ped.outfit;
+
     this.color.setHex(ped.shirt);
     this.torsoInst.setColorAt(i, this.color);
+
     this.color.setHex(ped.skin);
     this.headInst.setColorAt(i, this.color);
     this.color.setHex(outfit.shorts ? ped.skin : ped.pants);
     this.legLInst.setColorAt(i, this.color);
     this.legRInst.setColorAt(i, this.color);
+
     this.color.setHex(outfit.shortSleeves ? ped.skin : ped.shirt);
     this.armInst.setColorAt(i * 2, this.color);
     this.armInst.setColorAt(i * 2 + 1, this.color);
+
     this.color.setHex(outfit.hat !== null ? outfit.hat : ped.skin);
     this.hatInst.setColorAt(i, this.color);
   }
@@ -96,26 +107,32 @@ export class PedestrianManager {
   }
 
   // A sidewalk point inside the spawn ring, biased behind the player. Returns null if none of a
-  // few seeded tries qualifies (the ped then waits for a later frame).
+  // few seeded tries qualifies, in which case the ped waits for a later frame.
   findRingSpawn(player) {
-    const fx = Math.sin(player.heading);
-    const fz = Math.cos(player.heading);
+    const forwardX = Math.sin(player.heading);
+    const forwardZ = Math.cos(player.heading);
     for (let attempt = 0; attempt < 8; attempt++) {
       const rect = this.rng.pick(this.sidewalks);
+      // Walk along the rect on one axis and stand on an edge of the other.
       const alongX = this.rng.chance(0.5);
-      const edge = this.rng.chance(0.5);
-      const inset = 1.6;
-      const x = alongX ? this.rng.range(rect.minX + inset, rect.maxX - inset) : edge ? rect.minX + inset : rect.maxX - inset;
-      const z = alongX ? (edge ? rect.minZ + inset : rect.maxZ - inset) : this.rng.range(rect.minZ + inset, rect.maxZ - inset);
+      const nearEdge = this.rng.chance(0.5);
+      const x = alongX
+        ? this.rng.range(rect.minX + INSET, rect.maxX - INSET)
+        : nearEdge ? rect.minX + INSET : rect.maxX - INSET;
+      const z = alongX
+        ? (nearEdge ? rect.minZ + INSET : rect.maxZ - INSET)
+        : this.rng.range(rect.minZ + INSET, rect.maxZ - INSET);
       const dx = x - player.pos.x;
       const dz = z - player.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d < RING.inner || d > RING.outer) continue;
+      const distance = Math.hypot(dx, dz);
+      if (distance < RING.inner || distance > RING.outer) continue;
       // Reject points straight ahead of the player on the first tries.
-      if (attempt < 5 && (dx * fx + dz * fz) / d > 0.35) continue;
+      if (attempt < 5 && (dx * forwardX + dz * forwardZ) / distance > 0.35) continue;
       if (this.city.isBlocked && this.city.isBlocked(x, z, 1)) continue;
-      const dir = alongX ? [this.rng.chance(0.5) ? 1 : -1, 0] : [0, this.rng.chance(0.5) ? 1 : -1];
-      return { x, z, dirX: dir[0], dirZ: dir[1] };
+      const sign = this.rng.chance(0.5) ? 1 : -1;
+      return alongX
+        ? { x, z, dirX: sign, dirZ: 0 }
+        : { x, z, dirX: 0, dirZ: sign };
     }
     return null;
   }
@@ -124,89 +141,101 @@ export class PedestrianManager {
   recycle(dt, player) {
     this.recycleBudget = Math.min(RING.recyclePerSecond, this.recycleBudget + dt * RING.recyclePerSecond);
     if (this.recycleBudget < 1) return;
-    const despawn2 = RING.despawn * RING.despawn;
+
+    const despawnSq = RING.despawn * RING.despawn;
+    const bodySq = 40 * 40;
     for (let i = 0; i < this.activeCount && this.recycleBudget >= 1; i++) {
-      const p = this.peds[i];
-      const dx = p.pos.x - player.pos.x;
-      const dz = p.pos.z - player.pos.z;
-      const far = dx * dx + dz * dz > despawn2;
-      const expiredBody = !p.alive && p.hitTimer <= -RING.deadLinger && dx * dx + dz * dz > 40 * 40;
-      if (!far && !expiredBody) continue;
+      const ped = this.peds[i];
+      const dx = ped.pos.x - player.pos.x;
+      const dz = ped.pos.z - player.pos.z;
+      const distSq = dx * dx + dz * dz;
+      const tooFar = distSq > despawnSq;
+      const expiredBody = !ped.alive && ped.hitTimer <= -RING.deadLinger && distSq > bodySq;
+      if (!tooFar && !expiredBody) continue;
+
       const spot = this.findRingSpawn(player);
       if (!spot) break;
       this.recycleBudget -= 1;
       this.recycled++;
+
       this.placePedestrian(i, spot.x, spot.z, Math.atan2(spot.dirX, spot.dirZ), spot.dirX, spot.dirZ);
       // Fresh look: industrial streets get dock workers, everywhere else the normal mix.
       const district = this.city.districtAt ? this.city.districtAt(spot.x, spot.z) : 'residential';
       const outfit = district === 'industrial' && this.rng.chance(0.6) ? WORKER_OUTFIT : this.pickOutfit();
-      p.outfit = outfit;
-      p.shirt = this.rng.pick(outfit.shirts);
-      p.pants = this.rng.pick(outfit.pants);
-      p.skin = this.rng.pick(SKIN_TONES);
-      p.speed = this.rng.range(1.4, 2.3) * outfit.speedScale;
-      p.hitTimer = 0;
+      ped.outfit = outfit;
+      ped.shirt = this.rng.pick(outfit.shirts);
+      ped.pants = this.rng.pick(outfit.pants);
+      ped.skin = this.rng.pick(SKIN_TONES);
+      ped.speed = this.rng.range(1.4, 2.3) * outfit.speedScale;
+      ped.hitTimer = 0;
       this.applyColors(i);
       this.markColorsDirty();
     }
   }
 
-  // Separation: bucket live, upright peds into a 2 m grid and push overlapping pairs apart.
-  // Each ped also nudges its walking direction away so pairs slide past instead of jamming.
+  // Separation: bucket live, upright peds into a 2 m grid and push overlapping pairs apart. Each
+  // ped also nudges its walking direction away so pairs slide past instead of jamming.
   applyAvoidance(dt) {
     const grid = this.avoidGrid;
-    grid.clear();
     const cell = AVOID.cell;
-    const key = (cx, cz) => cx * 73856093 ^ cz * 19349663;
+    const radius = AVOID.radius;
+    const radiusSq = radius * radius;
+    const steerAmount = AVOID.strength * dt * 4;
+
+    // Bucket index for a grid coordinate (wrapping hash, collisions just mean a few extra checks).
+    const cellKey = (cx, cz) => (cx * 73856093) ^ (cz * 19349663);
+    const steers = (ped) => ped.panic > 0 || ped.dodge > 0 || ped.fleeing;
+    const steer = (ped, sx, sz) => {
+      ped.dirX += sx * steerAmount;
+      ped.dirZ += sz * steerAmount;
+      const length = Math.hypot(ped.dirX, ped.dirZ) || 1;
+      ped.dirX /= length;
+      ped.dirZ /= length;
+    };
+
+    grid.clear();
     for (let i = 0; i < this.activeCount; i++) {
-      const p = this.peds[i];
-      if (!p.alive || p.knocked > 0) continue;
-      const k = key(Math.floor(p.pos.x / cell), Math.floor(p.pos.z / cell));
-      let list = grid.get(k);
-      if (!list) {
-        list = [];
-        grid.set(k, list);
+      const ped = this.peds[i];
+      if (!ped.alive || ped.knocked > 0) continue;
+      const key = cellKey(Math.floor(ped.pos.x / cell), Math.floor(ped.pos.z / cell));
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
       }
-      list.push(i);
+      bucket.push(i);
     }
-    const r = AVOID.radius;
+
     for (let i = 0; i < this.activeCount; i++) {
       const a = this.peds[i];
       if (!a.alive || a.knocked > 0) continue;
-      const cx = Math.floor(a.pos.x / cell);
-      const cz = Math.floor(a.pos.z / cell);
+      const cellX = Math.floor(a.pos.x / cell);
+      const cellZ = Math.floor(a.pos.z / cell);
       for (let ox = -1; ox <= 1; ox++) {
         for (let oz = -1; oz <= 1; oz++) {
-          const list = grid.get(key(cx + ox, cz + oz));
-          if (!list) continue;
-          for (const j of list) {
+          const bucket = grid.get(cellKey(cellX + ox, cellZ + oz));
+          if (!bucket) continue;
+          for (const j of bucket) {
             if (j <= i) continue;
             const b = this.peds[j];
             const dx = b.pos.x - a.pos.x;
             const dz = b.pos.z - a.pos.z;
-            const d2 = dx * dx + dz * dz;
-            if (d2 >= r * r || d2 < 1e-8) continue;
-            const d = Math.sqrt(d2);
-            const push = (r - d) * 0.5;
-            const nx = dx / d;
-            const nz = dz / d;
+            const distSq = dx * dx + dz * dz;
+            if (distSq >= radiusSq || distSq < 1e-8) continue;
+
+            const distance = Math.sqrt(distSq);
+            const push = (radius - distance) * 0.5;
+            const nx = dx / distance;
+            const nz = dz / distance;
             a.pos.x -= nx * push;
             a.pos.z -= nz * push;
             b.pos.x += nx * push;
             b.pos.z += nz * push;
-            // Steer only free-running (panicking / dodging) peds; calm walkers keep their
-            // axis-aligned sidewalk heading and just get shouldered aside by the push above.
-            const s = AVOID.strength * dt * 4;
-            const steer = (p, sx, sz) => {
-              if (p.panic <= 0 && p.dodge <= 0 && !p.fleeing) return;
-              p.dirX += sx * s;
-              p.dirZ += sz * s;
-              const l = Math.hypot(p.dirX, p.dirZ) || 1;
-              p.dirX /= l;
-              p.dirZ /= l;
-            };
-            steer(a, -nx, -nz);
-            steer(b, nx, nz);
+
+            // Only free-running (panicking / dodging / fleeing) peds steer; calm walkers keep
+            // their axis-aligned sidewalk heading and are just shouldered aside by the push.
+            if (steers(a)) steer(a, -nx, -nz);
+            if (steers(b)) steer(b, nx, nz);
           }
         }
       }
@@ -215,45 +244,46 @@ export class PedestrianManager {
 
   pickOutfit() {
     let roll = this.rng.next() * OUTFIT_TOTAL;
-    for (const o of OUTFITS) {
-      roll -= o.weight;
-      if (roll <= 0) return o;
+    for (const outfit of OUTFITS) {
+      roll -= outfit.weight;
+      if (roll <= 0) return outfit;
     }
     return OUTFITS[0];
   }
 
   spawnAll() {
     this.peds.length = 0;
-    const swList = this.city.sidewalkRects;
+    const sidewalks = this.city.sidewalkRects;
+
     for (let i = 0; i < this.count; i++) {
-      const rect = this.rng.pick(swList);
+      const rect = this.rng.pick(sidewalks);
       const side = this.rng.int(0, 3);
-      const inset = 1.6;
       let x, z, dirX, dirZ;
+
       if (side === 0) {
-        x = this.rng.range(rect.minX + inset, rect.maxX - inset);
-        z = rect.minZ + inset;
+        x = this.rng.range(rect.minX + INSET, rect.maxX - INSET);
+        z = rect.minZ + INSET;
         dirX = this.rng.chance(0.5) ? 1 : -1;
         dirZ = 0;
       } else if (side === 1) {
-        x = this.rng.range(rect.minX + inset, rect.maxX - inset);
-        z = rect.maxZ - inset;
+        x = this.rng.range(rect.minX + INSET, rect.maxX - INSET);
+        z = rect.maxZ - INSET;
         dirX = this.rng.chance(0.5) ? 1 : -1;
         dirZ = 0;
       } else if (side === 2) {
-        x = rect.minX + inset;
-        z = this.rng.range(rect.minZ + inset, rect.maxZ - inset);
+        x = rect.minX + INSET;
+        z = this.rng.range(rect.minZ + INSET, rect.maxZ - INSET);
         dirX = 0;
         dirZ = this.rng.chance(0.5) ? 1 : -1;
       } else {
-        x = rect.maxX - inset;
-        z = this.rng.range(rect.minZ + inset, rect.maxZ - inset);
+        x = rect.maxX - INSET;
+        z = this.rng.range(rect.minZ + INSET, rect.maxZ - INSET);
         dirX = 0;
         dirZ = this.rng.chance(0.5) ? 1 : -1;
       }
 
       const outfit = this.pickOutfit();
-      const ped = {
+      this.peds.push({
         pos: new THREE.Vector3(x, 0.22, z),
         dirX,
         dirZ,
@@ -281,80 +311,84 @@ export class PedestrianManager {
         knocked: 0,
         knockDirX: 0,
         knockDirZ: 0,
-      };
-      this.peds.push(ped);
+      });
       this.applyColors(i);
     }
+
     this.markColorsDirty();
     this.syncInstances();
   }
 
   placePedestrian(index, x, z, heading, dirX, dirZ) {
     if (index < 0 || index >= this.peds.length) return;
-    const p = this.peds[index];
-    p.pos.set(x, 0.22, z);
-    p.heading = heading;
-    p.dirX = dirX;
-    p.dirZ = dirZ;
-    p.alive = true;
-    p.fleeing = false;
-    p.panic = 0;
-    p.dodge = 0;
-    p.idle = 0;
-    p.knocked = 0;
+    const ped = this.peds[index];
+    ped.pos.set(x, 0.22, z);
+    ped.heading = heading;
+    ped.dirX = dirX;
+    ped.dirZ = dirZ;
+    ped.alive = true;
+    ped.fleeing = false;
+    ped.panic = 0;
+    ped.dodge = 0;
+    ped.idle = 0;
+    ped.knocked = 0;
   }
 
   // Gunfire (or a horn blast) makes everyone within `radius` bolt away from `source`.
   alertGunfire(source, radius = PED_CFG.panicDuration * 6) {
-    const r2 = radius * radius;
-    for (const p of this.peds) {
-      if (!p.alive || p.knocked > 0) continue;
-      const dx = p.pos.x - source.x;
-      const dz = p.pos.z - source.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 > r2) continue;
-      const d = Math.sqrt(d2) || 1;
-      p.panic = PED_CFG.panicDuration * (0.7 + 0.3 * (1 - d / radius));
-      p.fleeX = dx / d;
-      p.fleeZ = dz / d;
-      p.idle = 0;
+    const radiusSq = radius * radius;
+    for (const ped of this.peds) {
+      if (!ped.alive || ped.knocked > 0) continue;
+      const dx = ped.pos.x - source.x;
+      const dz = ped.pos.z - source.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq > radiusSq) continue;
+      const distance = Math.sqrt(distSq) || 1;
+      ped.panic = PED_CFG.panicDuration * (0.7 + 0.3 * (1 - distance / radius));
+      ped.fleeX = dx / distance;
+      ped.fleeZ = dz / distance;
+      ped.idle = 0;
     }
   }
 
   // A punch: the ped is knocked flat along `dir`, then gets up and runs.
-  knockDown(p, dir) {
-    if (!p.alive) return;
-    p.knocked = 2.6;
-    p.knockDirX = dir.x;
-    p.knockDirZ = dir.z;
-    p.heading = Math.atan2(-dir.x, -dir.z);
-    p.panic = 0;
+  knockDown(ped, dir) {
+    if (!ped.alive) return;
+    ped.knocked = 2.6;
+    ped.knockDirX = dir.x;
+    ped.knockDirZ = dir.z;
+    ped.heading = Math.atan2(-dir.x, -dir.z);
+    ped.panic = 0;
   }
 
   // Sidestep out of the path of any fast car heading toward this pedestrian.
-  checkVehicleThreat(p, vehicles) {
+  checkVehicleThreat(ped, vehicles) {
     if (!vehicles || !vehicles.vehicles) return;
-    const scareR2 = TRAFFIC_CFG.scareRadius * TRAFFIC_CFG.scareRadius;
-    for (const v of vehicles.vehicles) {
-      const spd = Math.abs(v.speed || 0);
-      if (spd < TRAFFIC_CFG.scareSpeed) continue;
-      const dx = p.pos.x - v.pos.x;
-      const dz = p.pos.z - v.pos.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 > scareR2) continue;
-      const sgn = v.speed >= 0 ? 1 : -1;
-      const fx = Math.sin(v.heading) * sgn;
-      const fz = Math.cos(v.heading) * sgn;
-      const ahead = dx * fx + dz * fz;
-      if (ahead <= 0) continue;
-      const lateral = dx * fz - dz * fx;
+    const scareSq = TRAFFIC_CFG.scareRadius * TRAFFIC_CFG.scareRadius;
+
+    for (const vehicle of vehicles.vehicles) {
+      const speed = Math.abs(vehicle.speed || 0);
+      if (speed < TRAFFIC_CFG.scareSpeed) continue;
+
+      const dx = ped.pos.x - vehicle.pos.x;
+      const dz = ped.pos.z - vehicle.pos.z;
+      if (dx * dx + dz * dz > scareSq) continue;
+
+      // Vehicle forward vector, accounting for reverse gear.
+      const sign = vehicle.speed >= 0 ? 1 : -1;
+      const forwardX = Math.sin(vehicle.heading) * sign;
+      const forwardZ = Math.cos(vehicle.heading) * sign;
+      if (dx * forwardX + dz * forwardZ <= 0) continue;
+
+      const lateral = dx * forwardZ - dz * forwardX;
       if (Math.abs(lateral) > 3.2) continue;
+
       // Dive to whichever side the ped is already on.
       const side = lateral >= 0 ? 1 : -1;
-      p.dodge = 0.9;
-      p.dodgeX = fz * side;
-      p.dodgeZ = -fx * side;
-      p.idle = 0;
+      ped.dodge = 0.9;
+      ped.dodgeX = forwardZ * side;
+      ped.dodgeZ = -forwardX * side;
+      ped.idle = 0;
       return;
     }
   }
@@ -362,135 +396,149 @@ export class PedestrianManager {
   update(dt, player, vehicles, police) {
     this.time += dt;
     const wanted = police ? police.stars > 0 : false;
-    const pPos = player.pos;
+    const playerPos = player.pos;
     const annex = this.city.annex;
 
     for (let i = 0; i < this.activeCount; i++) {
-      const p = this.peds[i];
-      if (!p.alive) {
-        // Keeps counting below zero so recycle() can tell how long the body has lain there.
-        p.hitTimer -= dt;
+      const ped = this.peds[i];
+      if (!ped.alive) {
+        // Counts below zero so recycle() can tell how long the body has lain there.
+        ped.hitTimer -= dt;
         continue;
       }
 
-      if (p.knocked > 0) {
-        p.knocked -= dt;
-        const slide = Math.max(0, p.knocked - 2.2) * 6;
-        p.pos.x += p.knockDirX * slide * dt;
-        p.pos.z += p.knockDirZ * slide * dt;
-        if (p.knocked <= 0) {
-          p.panic = PED_CFG.panicDuration;
-          p.fleeX = p.knockDirX;
-          p.fleeZ = p.knockDirZ;
+      if (ped.knocked > 0) {
+        ped.knocked -= dt;
+        const slide = Math.max(0, ped.knocked - 2.2) * 6;
+        ped.pos.x += ped.knockDirX * slide * dt;
+        ped.pos.z += ped.knockDirZ * slide * dt;
+        if (ped.knocked <= 0) {
+          ped.panic = PED_CFG.panicDuration;
+          ped.fleeX = ped.knockDirX;
+          ped.fleeZ = ped.knockDirZ;
         }
         continue;
       }
 
-      // React to wanted player by fleeing
-      const dxP = p.pos.x - pPos.x;
-      const dzP = p.pos.z - pPos.z;
-      const distSqP = dxP * dxP + dzP * dzP;
-      if (wanted && distSqP < 1600) {
-        p.fleeing = true;
-      } else if (!wanted && distSqP > 2500) {
-        p.fleeing = false;
+      // React to a wanted player by fleeing.
+      const dxPlayer = ped.pos.x - playerPos.x;
+      const dzPlayer = ped.pos.z - playerPos.z;
+      const distSqPlayer = dxPlayer * dxPlayer + dzPlayer * dzPlayer;
+      if (wanted && distSqPlayer < 1600) {
+        ped.fleeing = true;
+      } else if (!wanted && distSqPlayer > 2500) {
+        ped.fleeing = false;
       }
 
-      if (p.panic > 0) p.panic -= dt;
-      if (p.dodge > 0) p.dodge -= dt;
-      else this.checkVehicleThreat(p, vehicles);
+      if (ped.panic > 0) ped.panic -= dt;
+      if (ped.dodge > 0) ped.dodge -= dt;
+      else this.checkVehicleThreat(ped, vehicles);
 
-      let moveSpeed = p.speed;
-      if (p.dodge > 0) {
-        p.dirX = p.dodgeX;
-        p.dirZ = p.dodgeZ;
+      let moveSpeed = ped.speed;
+      if (ped.dodge > 0) {
+        ped.dirX = ped.dodgeX;
+        ped.dirZ = ped.dodgeZ;
         moveSpeed = 6.5;
-      } else if (p.panic > 0) {
-        p.dirX = p.fleeX;
-        p.dirZ = p.fleeZ;
-        moveSpeed = PED_CFG.panicSpeed * (0.8 + 0.2 * Math.min(1, p.panic));
-      } else if (p.fleeing && distSqP > 0.1) {
-        const inv = 1 / Math.sqrt(distSqP);
-        p.dirX = dxP * inv;
-        p.dirZ = dzP * inv;
+      } else if (ped.panic > 0) {
+        ped.dirX = ped.fleeX;
+        ped.dirZ = ped.fleeZ;
+        moveSpeed = PED_CFG.panicSpeed * (0.8 + 0.2 * Math.min(1, ped.panic));
+      } else if (ped.fleeing && distSqPlayer > 0.1) {
+        const inverse = 1 / Math.sqrt(distSqPlayer);
+        ped.dirX = dxPlayer * inverse;
+        ped.dirZ = dzPlayer * inverse;
         moveSpeed = PED_CFG.panicSpeed;
-      } else if (p.idle > 0) {
+      } else if (ped.idle > 0) {
         // Standing around: look about, then carry on.
-        p.idle -= dt;
+        ped.idle -= dt;
         moveSpeed = 0;
       } else {
         // Occasionally turn at block corners or cross streets at crosswalks, or pause.
-        p.crossCooldown -= dt;
-        if (p.crossCooldown <= 0) {
-          p.crossCooldown = this.rng.range(4, 10);
-          if (this.rng.chance(PED_CFG.idleChance) && p.outfit.id !== 'jogger') {
-            p.idle = this.rng.range(1.5, 4);
+        ped.crossCooldown -= dt;
+        if (ped.crossCooldown <= 0) {
+          ped.crossCooldown = this.rng.range(4, 10);
+          const wantsIdle = this.rng.chance(PED_CFG.idleChance);
+          if (wantsIdle && ped.outfit.id !== 'jogger') {
+            ped.idle = this.rng.range(1.5, 4);
           } else if (this.rng.chance(0.35)) {
-            const tmp = p.dirX;
-            p.dirX = -p.dirZ;
-            p.dirZ = tmp;
+            const previousDirX = ped.dirX;
+            ped.dirX = -ped.dirZ;
+            ped.dirZ = previousDirX;
           }
         }
       }
 
-      p.pos.x += p.dirX * moveSpeed * dt;
-      p.pos.z += p.dirZ * moveSpeed * dt;
+      ped.pos.x += ped.dirX * moveSpeed * dt;
+      ped.pos.z += ped.dirZ * moveSpeed * dt;
       if (moveSpeed > 0) {
-        const target = Math.atan2(p.dirX, p.dirZ);
-        let diff = target - p.heading;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        p.heading += diff * Math.min(1, dt * 10);
-        p.phase += dt * moveSpeed * 4.2;
+        let diff = Math.atan2(ped.dirX, ped.dirZ) - ped.heading;
+        while (diff > Math.PI) diff -= TAU;
+        while (diff < -Math.PI) diff += TAU;
+        ped.heading += diff * Math.min(1, dt * 10);
+        ped.phase += dt * moveSpeed * 4.2;
       } else {
         // Ease legs back together while standing.
-        p.phase += (Math.round(p.phase / Math.PI) * Math.PI - p.phase) * Math.min(1, dt * 6);
+        ped.phase += (Math.round(ped.phase / Math.PI) * Math.PI - ped.phase) * Math.min(1, dt * 6);
       }
 
       // Head turn: idle peds glance around; anyone near the player watches him.
-      let targetYaw = 0;
-      if (distSqP < 36 && p.panic <= 0) {
-        const toPlayer = Math.atan2(-dxP, -dzP);
-        let rel = toPlayer - p.heading;
-        while (rel > Math.PI) rel -= Math.PI * 2;
-        while (rel < -Math.PI) rel += Math.PI * 2;
+      let targetYaw;
+      if (distSqPlayer < 36 && ped.panic <= 0) {
+        let rel = Math.atan2(-dxPlayer, -dzPlayer) - ped.heading;
+        while (rel > Math.PI) rel -= TAU;
+        while (rel < -Math.PI) rel += TAU;
         targetYaw = Math.max(-1.1, Math.min(1.1, rel));
       } else if (moveSpeed === 0) {
-        targetYaw = Math.sin(this.time * 0.9 + p.lookSeed) * 0.9;
+        targetYaw = Math.sin(this.time * 0.9 + ped.lookSeed) * 0.9;
       } else {
-        targetYaw = Math.sin(this.time * 0.35 + p.lookSeed) * 0.25;
+        targetYaw = Math.sin(this.time * 0.35 + ped.lookSeed) * 0.25;
       }
-      p.headYaw += (targetYaw - p.headYaw) * Math.min(1, dt * PED_CFG.headTurnRate * 2);
+      ped.headYaw += (targetYaw - ped.headYaw) * Math.min(1, dt * PED_CFG.headTurnRate * 2);
 
-      // Keep to the city: main grid, plus the West Annex band.
-      if (p.pos.x > CITY.beachStartX - 2) { p.pos.x = CITY.beachStartX - 3; p.dirX = -Math.abs(p.dirX); p.fleeX = -Math.abs(p.fleeX); }
-      const inAnnexBand = annex && p.pos.z > annex.minZ + 2 && p.pos.z < annex.maxZ - 2;
+      // Keep to the city: the main grid, plus the West Annex band.
+      if (ped.pos.x > CITY.beachStartX - 2) {
+        ped.pos.x = CITY.beachStartX - 3;
+        ped.dirX = -Math.abs(ped.dirX);
+        ped.fleeX = -Math.abs(ped.fleeX);
+      }
+      const inAnnexBand = annex && ped.pos.z > annex.minZ + 2 && ped.pos.z < annex.maxZ - 2;
       const westEdge = inAnnexBand ? annex.minX + 2 : -CITY.halfSpanX;
-      if (p.pos.x < westEdge) { p.pos.x = westEdge + 2; p.dirX = Math.abs(p.dirX); p.fleeX = Math.abs(p.fleeX); }
-      if (p.pos.z > CITY.halfSpanZ) { p.pos.z = CITY.halfSpanZ - 2; p.dirZ = -Math.abs(p.dirZ); p.fleeZ = -Math.abs(p.fleeZ); }
-      if (p.pos.z < -CITY.halfSpanZ) { p.pos.z = -CITY.halfSpanZ + 2; p.dirZ = Math.abs(p.dirZ); p.fleeZ = Math.abs(p.fleeZ); }
+      if (ped.pos.x < westEdge) {
+        ped.pos.x = westEdge + 2;
+        ped.dirX = Math.abs(ped.dirX);
+        ped.fleeX = Math.abs(ped.fleeX);
+      }
+      if (ped.pos.z > CITY.halfSpanZ) {
+        ped.pos.z = CITY.halfSpanZ - 2;
+        ped.dirZ = -Math.abs(ped.dirZ);
+        ped.fleeZ = -Math.abs(ped.fleeZ);
+      }
+      if (ped.pos.z < -CITY.halfSpanZ) {
+        ped.pos.z = -CITY.halfSpanZ + 2;
+        ped.dirZ = Math.abs(ped.dirZ);
+        ped.fleeZ = Math.abs(ped.fleeZ);
+      }
 
-      const hitBuilding = this.city.resolveCircleCollisions(p.pos, 0.42);
-      if (hitBuilding) {
-        const tmp = p.dirX;
-        p.dirX = -p.dirZ;
-        p.dirZ = tmp;
-        if (p.panic > 0) {
-          const t2 = p.fleeX;
-          p.fleeX = -p.fleeZ;
-          p.fleeZ = t2;
+      if (this.city.resolveCircleCollisions(ped.pos, 0.42)) {
+        const previousDirX = ped.dirX;
+        ped.dirX = -ped.dirZ;
+        ped.dirZ = previousDirX;
+        if (ped.panic > 0) {
+          const previousFleeX = ped.fleeX;
+          ped.fleeX = -ped.fleeZ;
+          ped.fleeZ = previousFleeX;
         }
       }
 
-      // Check collision with speeding player vehicle
+      // Check collision with the speeding player vehicle.
       if (player.vehicle && Math.abs(player.vehicle.speed) > 6.5) {
-        const vx = player.vehicle.pos.x - p.pos.x;
-        const vz = player.vehicle.pos.z - p.pos.z;
+        const vx = player.vehicle.pos.x - ped.pos.x;
+        const vz = player.vehicle.pos.z - ped.pos.z;
         if (vx * vx + vz * vz < 3.6) {
-          p.alive = false;
-          p.hitTimer = 10;
-          if (police) police.reportCrime('hit_pedestrian', p.pos, 1);
-          this.alertGunfire(p.pos, 20);
+          ped.alive = false;
+          ped.hitTimer = 10;
+          if (police) police.reportCrime('hit_pedestrian', ped.pos, 1);
+          this.alertGunfire(ped.pos, 20);
         }
       }
     }
@@ -501,14 +549,17 @@ export class PedestrianManager {
   }
 
   syncInstances() {
-    const d = this.dummy;
-    const hide = (inst, idx) => {
-      d.scale.set(0.001, 0.001, 0.001);
-      d.updateMatrix();
-      inst.setMatrixAt(idx, d.matrix);
+    const dummy = this.dummy;
+    // Collapse one instance (or arm slot) to nothing.
+    const hide = (instanced, index) => {
+      dummy.scale.set(0.001, 0.001, 0.001);
+      dummy.updateMatrix();
+      instanced.setMatrixAt(index, dummy.matrix);
     };
+
     for (let i = 0; i < this.peds.length; i++) {
-      const p = this.peds[i];
+      const ped = this.peds[i];
+
       if (i >= this.activeCount) {
         // Outside the active pool (low quality tier): collapse every part.
         hide(this.torsoInst, i);
@@ -520,17 +571,18 @@ export class PedestrianManager {
         hide(this.hatInst, i);
         continue;
       }
-      const down = !p.alive || p.knocked > 0;
+
+      const down = !ped.alive || ped.knocked > 0;
       if (down) {
         // Lying flat. A knocked-down ped starts to rise in the last half second.
-        const rise = p.alive ? Math.max(0, 1 - p.knocked / 0.5) : 0;
+        const rise = ped.alive ? Math.max(0, 1 - ped.knocked / 0.5) : 0;
         const tilt = Math.PI * 0.5 * (1 - rise);
-        d.position.set(p.pos.x, 0.14 + rise * 0.98, p.pos.z);
-        d.rotation.set(tilt, p.heading, 0, 'YXZ');
-        d.scale.set(0.46, 0.62, 0.24);
-        d.updateMatrix();
-        this.torsoInst.setMatrixAt(i, d.matrix);
-        d.rotation.order = 'XYZ';
+        dummy.position.set(ped.pos.x, 0.14 + rise * 0.98, ped.pos.z);
+        dummy.rotation.set(tilt, ped.heading, 0, 'YXZ');
+        dummy.scale.set(0.46, 0.62, 0.24);
+        dummy.updateMatrix();
+        this.torsoInst.setMatrixAt(i, dummy.matrix);
+        dummy.rotation.order = 'XYZ';
         hide(this.headInst, i);
         hide(this.legLInst, i);
         hide(this.legRInst, i);
@@ -540,66 +592,68 @@ export class PedestrianManager {
         continue;
       }
 
-      const running = p.panic > 0 || p.fleeing || p.dodge > 0;
-      const swingAmt = running ? 0.75 : 0.42;
-      const swing = Math.sin(p.phase) * swingAmt;
-      const bob = Math.abs(Math.cos(p.phase)) * (running ? 0.07 : 0.03);
-      const cosH = Math.cos(p.heading);
-      const sinH = Math.sin(p.heading);
+      const running = ped.panic > 0 || ped.fleeing || ped.dodge > 0;
+      const swing = Math.sin(ped.phase) * (running ? 0.75 : 0.42);
+      const bob = Math.abs(Math.cos(ped.phase)) * (running ? 0.07 : 0.03);
+      const cosHeading = Math.cos(ped.heading);
+      const sinHeading = Math.sin(ped.heading);
       const lean = running ? 0.18 : 0;
 
       // Torso
-      d.position.set(p.pos.x, p.pos.y + 1.12 + bob, p.pos.z);
-      d.rotation.set(lean, p.heading, 0, 'YXZ');
-      d.scale.set(0.46, 0.64, 0.24);
-      d.updateMatrix();
-      this.torsoInst.setMatrixAt(i, d.matrix);
+      dummy.position.set(ped.pos.x, ped.pos.y + 1.12 + bob, ped.pos.z);
+      dummy.rotation.set(lean, ped.heading, 0, 'YXZ');
+      dummy.scale.set(0.46, 0.64, 0.24);
+      dummy.updateMatrix();
+      this.torsoInst.setMatrixAt(i, dummy.matrix);
 
       // Head (turns independently of the body)
-      d.position.set(p.pos.x + sinH * lean * 0.4, p.pos.y + 1.62 + bob, p.pos.z + cosH * lean * 0.4);
-      d.rotation.set(0, p.heading + p.headYaw, 0, 'YXZ');
-      d.scale.set(0.27, 0.29, 0.27);
-      d.updateMatrix();
-      this.headInst.setMatrixAt(i, d.matrix);
+      const leanOffsetX = sinHeading * lean * 0.4;
+      const leanOffsetZ = cosHeading * lean * 0.4;
+      dummy.position.set(ped.pos.x + leanOffsetX, ped.pos.y + 1.62 + bob, ped.pos.z + leanOffsetZ);
+      dummy.rotation.set(0, ped.heading + ped.headYaw, 0, 'YXZ');
+      dummy.scale.set(0.27, 0.29, 0.27);
+      dummy.updateMatrix();
+      this.headInst.setMatrixAt(i, dummy.matrix);
 
-      // Hat brim
-      if (p.outfit.hat !== null) {
-        d.position.set(p.pos.x + sinH * lean * 0.4, p.pos.y + 1.79 + bob, p.pos.z + cosH * lean * 0.4);
-        d.scale.set(0.4, 0.06, 0.4);
-        d.updateMatrix();
-        this.hatInst.setMatrixAt(i, d.matrix);
+      // Hat brim (shares the head's rotation).
+      if (ped.outfit.hat !== null) {
+        dummy.position.set(ped.pos.x + leanOffsetX, ped.pos.y + 1.79 + bob, ped.pos.z + leanOffsetZ);
+        dummy.scale.set(0.4, 0.06, 0.4);
+        dummy.updateMatrix();
+        this.hatInst.setMatrixAt(i, dummy.matrix);
       } else {
         hide(this.hatInst, i);
       }
 
-      // Legs
-      const lx = -0.12 * cosH;
-      const lz = 0.12 * sinH;
-      d.position.set(p.pos.x + lx, p.pos.y + 0.42, p.pos.z + lz);
-      d.rotation.set(swing, p.heading, 0, 'YXZ');
-      d.scale.set(0.18, 0.78, 0.18);
-      d.updateMatrix();
-      this.legLInst.setMatrixAt(i, d.matrix);
+      // Legs, offset to either side across the walking direction.
+      const legOffsetX = -0.12 * cosHeading;
+      const legOffsetZ = 0.12 * sinHeading;
+      dummy.position.set(ped.pos.x + legOffsetX, ped.pos.y + 0.42, ped.pos.z + legOffsetZ);
+      dummy.rotation.set(swing, ped.heading, 0, 'YXZ');
+      dummy.scale.set(0.18, 0.78, 0.18);
+      dummy.updateMatrix();
+      this.legLInst.setMatrixAt(i, dummy.matrix);
 
-      d.position.set(p.pos.x - lx, p.pos.y + 0.42, p.pos.z - lz);
-      d.rotation.set(-swing, p.heading, 0, 'YXZ');
-      d.updateMatrix();
-      this.legRInst.setMatrixAt(i, d.matrix);
+      dummy.position.set(ped.pos.x - legOffsetX, ped.pos.y + 0.42, ped.pos.z - legOffsetZ);
+      dummy.rotation.set(-swing, ped.heading, 0, 'YXZ');
+      dummy.updateMatrix();
+      this.legRInst.setMatrixAt(i, dummy.matrix);
 
-      // Arms swing opposite to legs; panicking peds throw them up.
-      const ax = -0.3 * cosH;
-      const az = 0.3 * sinH;
-      const armSwing = p.panic > 0 ? -2.4 + Math.sin(p.phase * 2) * 0.3 : -swing * 0.9;
-      d.position.set(p.pos.x + ax, p.pos.y + 1.14 + bob, p.pos.z + az);
-      d.rotation.set(armSwing, p.heading, 0, 'YXZ');
-      d.scale.set(0.12, 0.58, 0.12);
-      d.updateMatrix();
-      this.armInst.setMatrixAt(i * 2, d.matrix);
-      d.position.set(p.pos.x - ax, p.pos.y + 1.14 + bob, p.pos.z - az);
-      d.rotation.set(p.panic > 0 ? armSwing : swing * 0.9, p.heading, 0, 'YXZ');
-      d.updateMatrix();
-      this.armInst.setMatrixAt(i * 2 + 1, d.matrix);
-      d.rotation.order = 'XYZ';
+      // Arms swing opposite to the legs; panicking peds throw both up.
+      const armOffsetX = -0.3 * cosHeading;
+      const armOffsetZ = 0.3 * sinHeading;
+      const armSwing = ped.panic > 0 ? -2.4 + Math.sin(ped.phase * 2) * 0.3 : -swing * 0.9;
+      dummy.position.set(ped.pos.x + armOffsetX, ped.pos.y + 1.14 + bob, ped.pos.z + armOffsetZ);
+      dummy.rotation.set(armSwing, ped.heading, 0, 'YXZ');
+      dummy.scale.set(0.12, 0.58, 0.12);
+      dummy.updateMatrix();
+      this.armInst.setMatrixAt(i * 2, dummy.matrix);
+
+      dummy.position.set(ped.pos.x - armOffsetX, ped.pos.y + 1.14 + bob, ped.pos.z - armOffsetZ);
+      dummy.rotation.set(ped.panic > 0 ? armSwing : swing * 0.9, ped.heading, 0, 'YXZ');
+      dummy.updateMatrix();
+      this.armInst.setMatrixAt(i * 2 + 1, dummy.matrix);
+      dummy.rotation.order = 'XYZ';
     }
 
     this.torsoInst.instanceMatrix.needsUpdate = true;
